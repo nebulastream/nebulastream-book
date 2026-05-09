@@ -1,0 +1,1588 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.9.37">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>15&nbsp; The Two-Queue Scheduler and Deadlock Avoidance – NebulaStream: A Stream Processing Engine from the Inside Out</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+/* CSS for citations */
+div.csl-bib-body { }
+div.csl-entry {
+  clear: both;
+}
+.hanging-indent div.csl-entry {
+  margin-left:2em;
+  text-indent:-2em;
+}
+div.csl-left-margin {
+  min-width:2em;
+  float:left;
+}
+div.csl-right-inline {
+  margin-left:2em;
+  padding-left:1em;
+}
+div.csl-indent {
+  margin-left: 2em;
+}</style>
+
+
+<script src="../site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="../site_libs/quarto-nav/headroom.min.js"></script>
+<script src="../site_libs/clipboard/clipboard.min.js"></script>
+<script src="../site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="../site_libs/quarto-search/fuse.min.js"></script>
+<script src="../site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="../">
+<link href="../chapters/16-stateful-operators.html" rel="next">
+<link href="../chapters/14-task-execution.html" rel="prev">
+<link href="../figures/favicon.ico" rel="icon">
+<script src="../site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="../site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="../site_libs/quarto-html/popper.min.js"></script>
+<script src="../site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="../site_libs/quarto-html/anchor.min.js"></script>
+<link href="../site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-f5b116b226ab7871a339bcb27e385d4f.css" rel="stylesheet" class="quarto-color-scheme" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-dark-fa7fa037caeb5c295dcabee9de8bbbbc.css" rel="stylesheet" class="quarto-color-scheme quarto-color-alternate" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-f5b116b226ab7871a339bcb27e385d4f.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
+<script src="../site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="../site_libs/bootstrap/bootstrap-59cd90b3a31d59781837685af5616a03.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-7555ce834b751ef39c6101133797c128.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-59cd90b3a31d59781837685af5616a03.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "location": "sidebar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "start",
+  "type": "textbox",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+<style>html{ scroll-behavior: smooth; }</style>
+
+
+</head>
+
+<body class="nav-sidebar docked quarto-light"><script id="quarto-html-before-body" type="application/javascript">
+    const toggleBodyColorMode = (bsSheetEl) => {
+      const mode = bsSheetEl.getAttribute("data-mode");
+      const bodyEl = window.document.querySelector("body");
+      if (mode === "dark") {
+        bodyEl.classList.add("quarto-dark");
+        bodyEl.classList.remove("quarto-light");
+      } else {
+        bodyEl.classList.add("quarto-light");
+        bodyEl.classList.remove("quarto-dark");
+      }
+    }
+    const toggleBodyColorPrimary = () => {
+      const bsSheetEl = window.document.querySelector("link#quarto-bootstrap:not([rel=disabled-stylesheet])");
+      if (bsSheetEl) {
+        toggleBodyColorMode(bsSheetEl);
+      }
+    }
+    const setColorSchemeToggle = (alternate) => {
+      const toggles = window.document.querySelectorAll('.quarto-color-scheme-toggle');
+      for (let i=0; i < toggles.length; i++) {
+        const toggle = toggles[i];
+        if (toggle) {
+          if (alternate) {
+            toggle.classList.add("alternate");
+          } else {
+            toggle.classList.remove("alternate");
+          }
+        }
+      }
+    };
+    const toggleColorMode = (alternate) => {
+      // Switch the stylesheets
+      const primaryStylesheets = window.document.querySelectorAll('link.quarto-color-scheme:not(.quarto-color-alternate)');
+      const alternateStylesheets = window.document.querySelectorAll('link.quarto-color-scheme.quarto-color-alternate');
+      manageTransitions('#quarto-margin-sidebar .nav-link', false);
+      if (alternate) {
+        // note: dark is layered on light, we don't disable primary!
+        enableStylesheet(alternateStylesheets);
+        for (const sheetNode of alternateStylesheets) {
+          if (sheetNode.id === "quarto-bootstrap") {
+            toggleBodyColorMode(sheetNode);
+          }
+        }
+      } else {
+        disableStylesheet(alternateStylesheets);
+        enableStylesheet(primaryStylesheets)
+        toggleBodyColorPrimary();
+      }
+      manageTransitions('#quarto-margin-sidebar .nav-link', true);
+      // Switch the toggles
+      setColorSchemeToggle(alternate)
+      // Hack to workaround the fact that safari doesn't
+      // properly recolor the scrollbar when toggling (#1455)
+      if (navigator.userAgent.indexOf('Safari') > 0 && navigator.userAgent.indexOf('Chrome') == -1) {
+        manageTransitions("body", false);
+        window.scrollTo(0, 1);
+        setTimeout(() => {
+          window.scrollTo(0, 0);
+          manageTransitions("body", true);
+        }, 40);
+      }
+    }
+    const disableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        stylesheet.rel = 'disabled-stylesheet';
+      }
+    }
+    const enableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        if(stylesheet.rel !== 'stylesheet') { // for Chrome, which will still FOUC without this check
+          stylesheet.rel = 'stylesheet';
+        }
+      }
+    }
+    const manageTransitions = (selector, allowTransitions) => {
+      const els = window.document.querySelectorAll(selector);
+      for (let i=0; i < els.length; i++) {
+        const el = els[i];
+        if (allowTransitions) {
+          el.classList.remove('notransition');
+        } else {
+          el.classList.add('notransition');
+        }
+      }
+    }
+    const isFileUrl = () => {
+      return window.location.protocol === 'file:';
+    }
+    const hasAlternateSentinel = () => {
+      let styleSentinel = getColorSchemeSentinel();
+      if (styleSentinel !== null) {
+        return styleSentinel === "alternate";
+      } else {
+        return false;
+      }
+    }
+    const setStyleSentinel = (alternate) => {
+      const value = alternate ? "alternate" : "default";
+      if (!isFileUrl()) {
+        window.localStorage.setItem("quarto-color-scheme", value);
+      } else {
+        localAlternateSentinel = value;
+      }
+    }
+    const getColorSchemeSentinel = () => {
+      if (!isFileUrl()) {
+        const storageValue = window.localStorage.getItem("quarto-color-scheme");
+        return storageValue != null ? storageValue : localAlternateSentinel;
+      } else {
+        return localAlternateSentinel;
+      }
+    }
+    const toggleGiscusIfUsed = (isAlternate, darkModeDefault) => {
+      const baseTheme = document.querySelector('#giscus-base-theme')?.value ?? 'light';
+      const alternateTheme = document.querySelector('#giscus-alt-theme')?.value ?? 'dark';
+      let newTheme = '';
+      if(authorPrefersDark) {
+        newTheme = isAlternate ? baseTheme : alternateTheme;
+      } else {
+        newTheme = isAlternate ? alternateTheme : baseTheme;
+      }
+      const changeGiscusTheme = () => {
+        // From: https://github.com/giscus/giscus/issues/336
+        const sendMessage = (message) => {
+          const iframe = document.querySelector('iframe.giscus-frame');
+          if (!iframe) return;
+          iframe.contentWindow.postMessage({ giscus: message }, 'https://giscus.app');
+        }
+        sendMessage({
+          setConfig: {
+            theme: newTheme
+          }
+        });
+      }
+      const isGiscussLoaded = window.document.querySelector('iframe.giscus-frame') !== null;
+      if (isGiscussLoaded) {
+        changeGiscusTheme();
+      }
+    };
+    const authorPrefersDark = false;
+    const darkModeDefault = authorPrefersDark;
+      document.querySelector('link#quarto-text-highlighting-styles.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+      document.querySelector('link#quarto-bootstrap.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+    let localAlternateSentinel = darkModeDefault ? 'alternate' : 'default';
+    // Dark / light mode switch
+    window.quartoToggleColorScheme = () => {
+      // Read the current dark / light value
+      let toAlternate = !hasAlternateSentinel();
+      toggleColorMode(toAlternate);
+      setStyleSentinel(toAlternate);
+      toggleGiscusIfUsed(toAlternate, darkModeDefault);
+      window.dispatchEvent(new Event('resize'));
+    };
+    // Switch to dark mode if need be
+    if (hasAlternateSentinel()) {
+      toggleColorMode(true);
+    } else {
+      toggleColorMode(false);
+    }
+  </script>
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top">
+  <nav class="quarto-secondary-nav">
+    <div class="container-fluid d-flex">
+      <button type="button" class="quarto-btn-toggle btn" data-bs-toggle="collapse" role="button" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+        <i class="bi bi-layout-text-sidebar-reverse"></i>
+      </button>
+        <nav class="quarto-page-breadcrumbs" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../chapters/14-task-execution.html">Runtime and Execution</a></li><li class="breadcrumb-item"><a href="../chapters/15-two-queue-scheduler.html"><span class="chapter-number">15</span>&nbsp; <span class="chapter-title">The Two-Queue Scheduler and Deadlock Avoidance</span></a></li></ol></nav>
+        <a class="flex-grow-1" role="navigation" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">      
+        </a>
+      <button type="button" class="btn quarto-search-button" aria-label="Search" onclick="window.quartoOpenSearch();">
+        <i class="bi bi-search"></i>
+      </button>
+    </div>
+  </nav>
+</header>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article">
+<!-- sidebar -->
+  <nav id="quarto-sidebar" class="sidebar collapse collapse-horizontal quarto-sidebar-collapse-item sidebar-navigation docked overflow-auto">
+    <div class="pt-lg-2 mt-2 text-left sidebar-header sidebar-header-stacked">
+      <a href="../index.html" class="sidebar-logo-link">
+      <img src="../figures/neslogo.png" alt="" class="sidebar-logo light-content py-0 d-lg-inline d-none">
+      <img src="../figures/neslogo.png" alt="" class="sidebar-logo dark-content py-0 d-lg-inline d-none">
+      </a>
+    <div class="sidebar-title mb-0 py-0">
+      <a href="../">NebulaStream Internals</a> 
+        <div class="sidebar-tools-main tools-wide">
+    <a href="https://github.com/nebulastream/nebulastream-book" title="Source Code" class="quarto-navigation-tool px-1" aria-label="Source Code"><i class="bi bi-github"></i></a>
+  <a href="" class="quarto-color-scheme-toggle quarto-navigation-tool  px-1" onclick="window.quartoToggleColorScheme(); return false;" title="Toggle dark mode"><i class="bi"></i></a>
+  <a href="" class="quarto-reader-toggle quarto-navigation-tool px-1" onclick="window.quartoToggleReader(); return false;" title="Toggle reader mode">
+  <div class="quarto-reader-toggle-btn">
+  <i class="bi"></i>
+  </div>
+</a>
+</div>
+    </div>
+      </div>
+        <div class="mt-2 flex-shrink-0 align-items-center">
+        <div class="sidebar-search">
+        <div id="quarto-search" class="" title="Search"></div>
+        </div>
+        </div>
+    <div class="sidebar-menu-container"> 
+    <ul class="list-unstyled mt-1">
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../index.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Preface</span></a>
+  </div>
+</li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-1" role="navigation" aria-expanded="true">
+ <span class="menu-text">Foundations</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-1" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-1" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/01-why-streaming.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">1</span>&nbsp; <span class="chapter-title">Why Stream Processing? Why Another Engine?</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/02-system-tour.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">2</span>&nbsp; <span class="chapter-title">System Tour: From SQL to Native Code</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/03-data-model.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">3</span>&nbsp; <span class="chapter-title">Data Model and Type System</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/04-buffer-management.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">4</span>&nbsp; <span class="chapter-title">Buffer Management and Memory Layout</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-2" role="navigation" aria-expanded="true">
+ <span class="menu-text">The Query Frontier</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-2" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-2" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/05-query-language.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">5</span>&nbsp; <span class="chapter-title">The Query Language and Parser</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/06-logical-algebra.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">6</span>&nbsp; <span class="chapter-title">Logical Operator Algebra</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/07-watermarks.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">7</span>&nbsp; <span class="chapter-title">Time, Watermarks, and Progress</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/08-sources-sinks.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">8</span>&nbsp; <span class="chapter-title">Sources, Sinks, and Input Formatters</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-3" role="navigation" aria-expanded="true">
+ <span class="menu-text">Optimization and Compilation</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-3" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-3" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/09-rule-based-optimization.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">9</span>&nbsp; <span class="chapter-title">Rule-Based Logical Optimization</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/10-physical-lowering.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">10</span>&nbsp; <span class="chapter-title">Physical Lowering and Operator Choice</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/11-pipelining.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">11</span>&nbsp; <span class="chapter-title">Pipelining and Compiled Plans</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/12-nautilus-codegen.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">12</span>&nbsp; <span class="chapter-title">JIT Code Generation with Nautilus and MLIR</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/13-plugins.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">13</span>&nbsp; <span class="chapter-title">Plugin Registries and Extensibility</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-4" role="navigation" aria-expanded="true">
+ <span class="menu-text">Runtime and Execution</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-4" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-4" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/14-task-execution.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">14</span>&nbsp; <span class="chapter-title">Task-Based Execution Model</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/15-two-queue-scheduler.html" class="sidebar-item-text sidebar-link active">
+ <span class="menu-text"><span class="chapter-number">15</span>&nbsp; <span class="chapter-title">The Two-Queue Scheduler and Deadlock Avoidance</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/16-stateful-operators.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">16</span>&nbsp; <span class="chapter-title">Stateful Operators and State Management</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/17-error-handling.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">17</span>&nbsp; <span class="chapter-title">Error Handling, Logging, and Observability</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/18-frontends.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">18</span>&nbsp; <span class="chapter-title">The Worker Process and Client Frontends</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-5" role="navigation" aria-expanded="true">
+ <span class="menu-text">Operations and Frontiers</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-5" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-5" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/19-distributed-deployment.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">19</span>&nbsp; <span class="chapter-title">Distributed Deployment: Cloud, Fog, Edge</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/20-testing.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">20</span>&nbsp; <span class="chapter-title">Testing: Unit, Integration, and Systests</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/21-benchmarking.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">21</span>&nbsp; <span class="chapter-title">Benchmarking and Performance Engineering</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/22-open-problems.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">22</span>&nbsp; <span class="chapter-title">Where to Next: Open Problems</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../references.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">References</span></a>
+  </div>
+</li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-6" role="navigation" aria-expanded="true">
+ <span class="menu-text">Appendices</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-6" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-6" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/A-build.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Building NebulaStream</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/B-conventions.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Coding Conventions</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/C-glossary.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Glossary</span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+    </ul>
+    </div>
+</nav>
+<div id="quarto-sidebar-glass" class="quarto-sidebar-collapse-item" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item"></div>
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">Table of contents</h2>
+   
+  <ul>
+  <li><a href="#sec-bounded-queue-problem" id="toc-sec-bounded-queue-problem" class="nav-link active" data-scroll-target="#sec-bounded-queue-problem"><span class="header-section-number">15.1</span> 15.1 The problem: a bounded queue and two ways to deadlock</a></li>
+  <li><a href="#sec-solving-p1" id="toc-sec-solving-p1" class="nav-link" data-scroll-target="#sec-solving-p1"><span class="header-section-number">15.2</span> 15.2 Solving P1: do not block the worker on emit</a></li>
+  <li><a href="#sec-solving-p2" id="toc-sec-solving-p2" class="nav-link" data-scroll-target="#sec-solving-p2"><span class="header-section-number">15.3</span> 15.3 Solving P2: a separate admission queue</a></li>
+  <li><a href="#sec-reading-order" id="toc-sec-reading-order" class="nav-link" data-scroll-target="#sec-reading-order"><span class="header-section-number">15.4</span> 15.4 Reading order: who wins the dequeue race</a></li>
+  <li><a href="#sec-semaphore-invariant" id="toc-sec-semaphore-invariant" class="nav-link" data-scroll-target="#sec-semaphore-invariant"><span class="header-section-number">15.5</span> 15.5 The semaphore invariant</a></li>
+  <li><a href="#sec-task-variant" id="toc-sec-task-variant" class="nav-link" data-scroll-target="#sec-task-variant"><span class="header-section-number">15.6</span> 15.6 The Task variant: not all tasks are workunits</a></li>
+  <li><a href="#sec-pending-pipeline-stop" id="toc-sec-pending-pipeline-stop" class="nav-link" data-scroll-target="#sec-pending-pipeline-stop"><span class="header-section-number">15.7</span> 15.7 Pending pipeline stops: when even two queues are not enough</a></li>
+  <li><a href="#sec-cancellation" id="toc-sec-cancellation" class="nav-link" data-scroll-target="#sec-cancellation"><span class="header-section-number">15.8</span> 15.8 Cancellation as a first-class concern</a></li>
+  <li><a href="#sec-worker-loop" id="toc-sec-worker-loop" class="nav-link" data-scroll-target="#sec-worker-loop"><span class="header-section-number">15.9</span> 15.9 Putting it together: the worker loop</a></li>
+  <li><a href="#sec-non-goals" id="toc-sec-non-goals" class="nav-link" data-scroll-target="#sec-non-goals"><span class="header-section-number">15.10</span> 15.10 What this design does not do</a></li>
+  <li><a href="#sec-summary" id="toc-sec-summary" class="nav-link" data-scroll-target="#sec-summary"><span class="header-section-number">15.11</span> Summary</a></li>
+  <li><a href="#sec-exercises" id="toc-sec-exercises" class="nav-link" data-scroll-target="#sec-exercises"><span class="header-section-number">15.12</span> Reading exercises</a></li>
+  <li><a href="#sec-references" id="toc-sec-references" class="nav-link" data-scroll-target="#sec-references"><span class="header-section-number">15.13</span> References</a></li>
+  </ul>
+<div class="toc-actions"><ul><li><a href="https://github.com/nebulastream/nebulastream-book/edit/main/chapters/15-two-queue-scheduler.qmd" class="toc-action"><i class="bi bi-github"></i>Edit this page</a></li><li><a href="https://github.com/nebulastream/nebulastream-book/issues/new" class="toc-action"><i class="bi empty"></i>Report an issue</a></li></ul></div></nav>
+    </div>
+<!-- main -->
+<main class="content" id="quarto-document-content">
+
+
+<header id="title-block-header" class="quarto-title-block default"><nav class="quarto-page-breadcrumbs quarto-title-breadcrumbs d-none d-lg-block" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../chapters/14-task-execution.html">Runtime and Execution</a></li><li class="breadcrumb-item"><a href="../chapters/15-two-queue-scheduler.html"><span class="chapter-number">15</span>&nbsp; <span class="chapter-title">The Two-Queue Scheduler and Deadlock Avoidance</span></a></li></ol></nav>
+<div class="quarto-title">
+<h1 class="title"><span id="sec-two-queue-scheduler" class="quarto-section-identifier"><span class="chapter-number">15</span>&nbsp; <span class="chapter-title">The Two-Queue Scheduler and Deadlock Avoidance</span></span></h1>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<div class="callout callout-style-default callout-note callout-titled" title="Status: complete first draft">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Status: complete first draft
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>This chapter has been drafted end-to-end against NebulaStream commit <code>cd3ef68c73</code>. It is the smoke-test chapter for the book — the first one written, used to validate voice and tooling. Maintainer review pending.</p>
+</div>
+</div>
+<p>A stream processing engine is, at its heart, a machine for moving tuples between stateful operators. The scheduler decides which operator runs next and on which worker thread. Get it wrong and the engine either starves under load, livelocks under pressure, or — most embarrassingly — deadlocks itself into a frozen process that has to be killed and restarted.</p>
+<p>In this chapter we open up NebulaStream’s scheduler. The structure we will examine is, in code, fewer than two hundred lines. The reasons it exists, the bugs that pushed it to its current shape, and the trade-offs it embodies — those take the rest of the chapter.</p>
+<p>We will not start with the solution. We will start with the bug.</p>
+<hr>
+<section id="sec-bounded-queue-problem" class="level2" data-number="15.1">
+<h2 data-number="15.1" class="anchored" data-anchor-id="sec-bounded-queue-problem"><span class="header-section-number">15.1</span> 15.1 The problem: a bounded queue and two ways to deadlock</h2>
+<p>Most production stream engines distribute work across a pool of worker threads using a shared task queue. Worker threads dequeue tasks, do some work, and emit follow-up tasks back to the queue. Sources also emit tasks: when a CSV file source reads a fresh batch of bytes and parses it into a <code>TupleBuffer</code>, it emits a task instructing some downstream pipeline to consume that buffer.</p>
+<p>In an idealised version of this design, the queue is unbounded. A task is always accepted, the producer never has to wait, and you only need to decide on dequeue order. In practice, an unbounded queue is a way to crash later. Memory is finite; if a fast source can permanently out-produce the workers, the queue grows without bound and the process exhausts its address space. The fix, almost reflexively, is to make the queue bounded.</p>
+<p>Then you have a different problem.</p>
+<p>A bounded queue, by definition, can be full. If a producer tries to write to a full queue, you have three choices: drop the task, return an error, or block the producer until space is available. Stream engines almost always choose to block — dropping or erroring would break the engine’s processing guarantees. Blocking the producer is called <em>backpressure</em> and it is the right answer. It is also the answer that introduces deadlocks.</p>
+<p>There are two distinct ways the engine can deadlock against its own bounded queue. NebulaStream’s design document for the query engine calls them P1 and P2 <span class="citation" data-cites="nes-task-queue-doc">(<a href="../references.html#ref-nes-task-queue-doc" role="doc-biblioref">NebulaStream contributors 2024</a>)</span>. We will use the same labels.</p>
+<p><strong>P1 — worker-emission deadlock.</strong> A worker thread holding a task attempts to emit a follow-up task. The queue is full. The thread blocks waiting for capacity. But capacity will only become available when <em>some other worker thread</em> dequeues a task, finishes it, and <em>emits its own follow-up</em>. If every worker is in the same emit-and-block state, no worker dequeues. The system deadlocks.</p>
+<p>This is not a hypothetical scenario. It is what happens during a hash join probe, where each input tuple may produce many output tuples; or during a window trigger, where firing a window emits a fan-out of downstream work. In both cases, a single dequeued task can produce many emitted tasks, and the queue can fill from the inside out.</p>
+<p><strong>P2 — source-flooding deadlock.</strong> Sources are not workers. A source thread does not dequeue tasks; it only emits them. If the source is faster than the workers — say, a high-rate sensor or a Kafka topic being replayed at full speed — the source can fill the queue with unprocessed tuples faster than the workers drain it. Once the queue is full, the source blocks; once the source blocks, no new work enters; the workers drain the queue and idle. Then the source unblocks and the cycle resumes. This is not a deadlock in the strict sense (the system makes progress eventually) but it has two ugly consequences. First, the workers cycle between full saturation and complete idleness. The throughput of the system is dictated by the queue size and not by the hardware. Second — more dangerously — if the worker emits a follow-up task while the queue is saturated by source-emitted tasks, the worker also blocks. Now we are back in P1.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Example 15.1: P1 in a hash join probe">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Example 15.1: P1 in a hash join probe
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Consider a hash join with two input streams <code>R</code> and <code>S</code>. The build side <code>R</code> has been hashed into an in-memory hash table. A <code>WorkTask</code> arrives for <code>S</code>: process this 8 KiB batch of <code>S</code> tuples. The probe finds matches for, on average, 1.7 tuples per input tuple, so the batch produces a follow-up batch about 1.7× as large.</p>
+<p>The worker dequeues the <code>S</code>-side <code>WorkTask</code>, performs the probe, and now needs to emit a follow-up <code>WorkTask</code> for the next operator downstream. If every worker thread is in this state — having just dequeued an <code>S</code> task and trying to emit a probe-result task — and the queue is full, no worker can emit and no worker can dequeue. That is P1.</p>
+</div>
+</div>
+<p>The two problems sound similar but they have different fixes. We will solve them separately.</p>
+<hr>
+</section>
+<section id="sec-solving-p1" class="level2" data-number="15.2">
+<h2 data-number="15.2" class="anchored" data-anchor-id="sec-solving-p1"><span class="header-section-number">15.2</span> 15.2 Solving P1: do not block the worker on emit</h2>
+<p>The cleanest fix to P1 is to ensure that <em>worker threads never block on emit</em>. A worker thread that holds work must always be able to make progress.</p>
+<p>NebulaStream’s published design document <span class="citation" data-cites="nes-task-queue-doc">(<a href="../references.html#ref-nes-task-queue-doc" role="doc-biblioref">NebulaStream contributors 2024</a>, §Continuation)</span> proposes a technique called <em>continuation</em>. When a worker fails to write its follow-up task to the queue, instead of blocking, the worker swaps: it stuffs its unsubmittable task into a thread-local slot and pulls one task off the queue to work on next. The next time the worker comes back to its slot, the queue may have drained enough to accept the swapped task.</p>
+<p>Continuation is elegant. It also has a subtle trap, identified in the same design document: some tasks cannot make progress on their own. A <code>PendingPipelineStop</code> task — which we will examine in detail in <a href="#sec-pending-pipeline-stop" class="quarto-xref"><span>Section 15.7</span></a> — checks whether a pipeline still has references and, if so, <em>re-emits itself</em>. If continuation forced the worker to take this task off the queue and immediately swap it back, the worker would loop without making progress.</p>
+<p>The published design proposes a workaround: instead of swapping, the worker takes one task off the queue, <em>replaces</em> its own task with that one, and works on the replacement. The original task gets put back at the end of the queue.</p>
+<div class="callout callout-style-default callout-warning callout-titled" title="Caveat: the live code uses a different fix">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Warning</span>Caveat: the live code uses a different fix
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>The design document was written when the internal queue was bounded. The current implementation uses an <em>unbounded</em> internal queue. The worker-emit path therefore cannot fail at all; continuation is no longer needed for P1.</p>
+<p>You can verify this directly. Open <code>/Users/zeuchste/git/nebulastream/nes-query-engine/TaskQueue.hpp</code> and observe that the internal queue is declared as <code>folly::UMPMCQueue&lt;TaskType, true&gt;</code> — the U is for unbounded — while only the admission queue is <code>folly::MPMCQueue&lt;TaskType&gt;</code>. The method <code>addInternalTaskNonBlocking</code> carries this guarantee in its name, and its body has no failure path:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb1-1"><a href="#cb1-1"></a><span class="kw">template</span> <span class="op">&lt;</span><span class="kw">typename</span> T <span class="op">=</span> TaskType<span class="op">&gt;</span></span>
+<span id="cb1-2"><a href="#cb1-2"></a><span class="dt">void</span> addInternalTaskNonBlocking<span class="op">(</span>T<span class="op">&amp;&amp;</span> task<span class="op">)</span></span>
+<span id="cb1-3"><a href="#cb1-3"></a><span class="op">{</span></span>
+<span id="cb1-4"><a href="#cb1-4"></a>    <span class="co">/// The order of operation upholds the invariant. internal is</span></span>
+<span id="cb1-5"><a href="#cb1-5"></a>    <span class="co">/// unbounded which makes this write always succeed (unless oom)</span></span>
+<span id="cb1-6"><a href="#cb1-6"></a>    internal<span class="op">.</span>enqueue<span class="op">(</span><span class="bu">std::</span>forward<span class="op">&lt;</span>T<span class="op">&gt;(</span>task<span class="op">));</span></span>
+<span id="cb1-7"><a href="#cb1-7"></a>    tasksAvailable<span class="op">.</span>release<span class="op">();</span></span>
+<span id="cb1-8"><a href="#cb1-8"></a><span class="op">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>This is the engine’s actual P1 fix as of <code>cd3ef68c73</code>: don’t bound the queue worker threads write to. We will use this as our reference throughout the chapter and note where the design document’s continuation scheme would still be needed if a future change made the internal queue bounded again.</p>
+</div>
+</div>
+<p>The choice between an unbounded internal queue and a bounded queue plus continuation is a real engineering trade-off, not a settled matter.</p>
+<p>The unbounded approach buys simplicity. Worker code never needs to handle a write failure; emission is a trivial enqueue. It also buys correctness for the <code>PendingPipelineStop</code> scenario: a self-emitting task can simply be appended without any concern about replacing a worker’s current task.</p>
+<p>The cost is that the engine no longer has a hard backpressure surface on the worker side. If a query produces a pathological amount of internal fan-out — imagine a many-to-many join with no selectivity — the internal queue can grow until it crashes the process. In practice this is bounded by other constraints: the number of <code>TupleBuffer</code>s in the pool (we will see why in <a href="../chapters/16-stateful-operators.html">Chapter 16</a>), the selectivity of upstream operators, the rate at which sources can be admitted (the next section). NebulaStream’s authors have decided that those constraints are sufficient. Other engines have decided differently; we will see Flink’s choice in <a href="#sec-reading-order" class="quarto-xref"><span>Section 15.4</span></a>’s sidebar.</p>
+<hr>
+</section>
+<section id="sec-solving-p2" class="level2" data-number="15.3">
+<h2 data-number="15.3" class="anchored" data-anchor-id="sec-solving-p2"><span class="header-section-number">15.3</span> 15.3 Solving P2: a separate admission queue</h2>
+<p>P2 — source-flooding — needs a different fix because it has a different cause. The issue is not that producers can block; it is that <em>some kinds of producers should be allowed to block, and others should not</em>. Sources can wait. Worker threads cannot.</p>
+<p>NebulaStream’s solution is to physically separate the two kinds of producers into two queues:</p>
+<ul>
+<li><strong><code>internal</code></strong> — the unbounded queue that worker threads emit into. Always accepts a write; never blocks.</li>
+<li><strong><code>admission</code></strong> — a bounded queue that sources, query starts, and query stops emit into. Blocks the producer when full.</li>
+</ul>
+<p>Worker threads dequeue from a logical merger of both: the internal queue is preferred, the admission queue is fallback. From the worker’s point of view, there is just one source of work; from the producer’s point of view, there are two clearly distinct paths with different blocking semantics.</p>
+<p>The implementation is in <code>nes-query-engine/TaskQueue.hpp</code>. Two folly queues, one semaphore, three public methods. The whole file is 124 lines.</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb2-1"><a href="#cb2-1"></a><span class="co">// nes-query-engine/TaskQueue.hpp:34-44</span></span>
+<span id="cb2-2"><a href="#cb2-2"></a><span class="kw">template</span> <span class="op">&lt;</span><span class="kw">typename</span> TaskType<span class="op">&gt;</span></span>
+<span id="cb2-3"><a href="#cb2-3"></a><span class="kw">class</span> TaskQueue</span>
+<span id="cb2-4"><a href="#cb2-4"></a><span class="op">{</span></span>
+<span id="cb2-5"><a href="#cb2-5"></a>    folly<span class="op">::</span>UMPMCQueue<span class="op">&lt;</span>TaskType<span class="op">,</span> <span class="kw">true</span><span class="op">&gt;</span> internal<span class="op">;</span></span>
+<span id="cb2-6"><a href="#cb2-6"></a>    folly<span class="op">::</span>MPMCQueue<span class="op">&lt;</span>TaskType<span class="op">&gt;</span> admission<span class="op">;</span></span>
+<span id="cb2-7"><a href="#cb2-7"></a></span>
+<span id="cb2-8"><a href="#cb2-8"></a>    <span class="co">/// INVARIANT: internal.size() + admission.size() &gt;= tasksAvailable</span></span>
+<span id="cb2-9"><a href="#cb2-9"></a>    <span class="bu">std::</span>counting_semaphore<span class="op">&lt;&gt;</span> tasksAvailable<span class="op">{</span><span class="dv">0</span><span class="op">};</span></span>
+<span id="cb2-10"><a href="#cb2-10"></a>    <span class="co">// ...</span></span>
+<span id="cb2-11"><a href="#cb2-11"></a><span class="op">};</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>The line <code>INVARIANT: internal.size() + admission.size() &gt;= tasksAvailable</code> is the heart of the design. We will return to it in <a href="#sec-semaphore-invariant" class="quarto-xref"><span>Section 15.5</span></a>.</p>
+<p>Three public write/read methods complete the interface:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb3-1"><a href="#cb3-1"></a><span class="co">// nes-query-engine/TaskQueue.hpp:71-94</span></span>
+<span id="cb3-2"><a href="#cb3-2"></a><span class="kw">template</span> <span class="op">&lt;</span><span class="kw">typename</span> T <span class="op">=</span> TaskType<span class="op">&gt;</span></span>
+<span id="cb3-3"><a href="#cb3-3"></a><span class="dt">bool</span> addAdmissionTaskBlocking<span class="op">(</span><span class="at">const</span> <span class="bu">std::</span>stop_token<span class="op">&amp;</span> stoken<span class="op">,</span> T<span class="op">&amp;&amp;</span> task<span class="op">);</span></span>
+<span id="cb3-4"><a href="#cb3-4"></a></span>
+<span id="cb3-5"><a href="#cb3-5"></a><span class="kw">template</span> <span class="op">&lt;</span><span class="kw">typename</span> T <span class="op">=</span> TaskType<span class="op">&gt;</span></span>
+<span id="cb3-6"><a href="#cb3-6"></a><span class="dt">void</span> addInternalTaskNonBlocking<span class="op">(</span>T<span class="op">&amp;&amp;</span> task<span class="op">);</span></span>
+<span id="cb3-7"><a href="#cb3-7"></a></span>
+<span id="cb3-8"><a href="#cb3-8"></a><span class="bu">std::</span>optional<span class="op">&lt;</span>TaskType<span class="op">&gt;</span> getNextTaskBlocking<span class="op">(</span><span class="at">const</span> <span class="bu">std::</span>stop_token<span class="op">&amp;</span> stoken<span class="op">);</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Three methods, three intents. The method names carry the semantics: admission is blocking, internal is non-blocking, dequeue is blocking with cancellation. There is also a non-blocking dequeue (<code>getNextTaskNonBlocking</code>) which we will not need in this chapter.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Example 15.2: P2 in a fast source">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Example 15.2: P2 in a fast source
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>A <code>TCPSource</code> is connected to a sensor producing a million events per second. Each batch of ten thousand events becomes one <code>WorkTask</code> written into the admission queue. The admission queue is sized at, say, four hundred slots.</p>
+<p>If the workers can process eight hundred batches per second, the queue fills in half a second. The source thread blocks on <code>addAdmissionTaskBlocking</code>. Meanwhile, the workers continue to drain — and crucially, when a worker emits a follow-up task into the <em>internal</em> queue, that emission still succeeds, because the internal queue is unbounded.</p>
+<p>The source’s blocking has, by design, no effect on worker progress. The fast sensor experiences backpressure (its TCP buffer fills, its TCP window shrinks, the upstream sensor learns to slow down) but the engine is not deadlocked. P2 is solved.</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-reading-order" class="level2" data-number="15.4">
+<h2 data-number="15.4" class="anchored" data-anchor-id="sec-reading-order"><span class="header-section-number">15.4</span> 15.4 Reading order: who wins the dequeue race</h2>
+<p>We have two queues. A worker thread asks for the next task. Which queue do we read from?</p>
+<p>The simple rule: prefer internal, fall back to admission.</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb4-1"><a href="#cb4-1"></a><span class="co">// nes-query-engine/TaskQueue.hpp:47-63</span></span>
+<span id="cb4-2"><a href="#cb4-2"></a>TaskType readElementAssumingItExists<span class="op">()</span></span>
+<span id="cb4-3"><a href="#cb4-3"></a><span class="op">{</span></span>
+<span id="cb4-4"><a href="#cb4-4"></a>    TaskType task<span class="op">;</span></span>
+<span id="cb4-5"><a href="#cb4-5"></a>    <span class="co">/// The semaphore guarantees that there is at least one element in</span></span>
+<span id="cb4-6"><a href="#cb4-6"></a>    <span class="co">/// either one of the queues.</span></span>
+<span id="cb4-7"><a href="#cb4-7"></a>    <span class="cf">if</span> <span class="op">(</span>internal<span class="op">.</span>try_dequeue<span class="op">(</span>task<span class="op">))</span></span>
+<span id="cb4-8"><a href="#cb4-8"></a>    <span class="op">{</span></span>
+<span id="cb4-9"><a href="#cb4-9"></a>        <span class="cf">return</span> task<span class="op">;</span></span>
+<span id="cb4-10"><a href="#cb4-10"></a>    <span class="op">}</span></span>
+<span id="cb4-11"><a href="#cb4-11"></a></span>
+<span id="cb4-12"><a href="#cb4-12"></a>    <span class="co">/// However, the MPMC `read` can spuriously fail under high contention,</span></span>
+<span id="cb4-13"><a href="#cb4-13"></a>    <span class="co">/// the alternative `readIfNotEmpty` does not but is significantly</span></span>
+<span id="cb4-14"><a href="#cb4-14"></a>    <span class="co">/// slower.</span></span>
+<span id="cb4-15"><a href="#cb4-15"></a>    <span class="cf">while</span> <span class="op">(!</span>admission<span class="op">.</span>read<span class="op">(</span>task<span class="op">))</span> <span class="op">[[</span><span class="at">unlikely</span><span class="op">]]</span></span>
+<span id="cb4-16"><a href="#cb4-16"></a>    <span class="op">{</span></span>
+<span id="cb4-17"><a href="#cb4-17"></a>    <span class="op">}</span></span>
+<span id="cb4-18"><a href="#cb4-18"></a></span>
+<span id="cb4-19"><a href="#cb4-19"></a>    <span class="cf">return</span> task<span class="op">;</span></span>
+<span id="cb4-20"><a href="#cb4-20"></a><span class="op">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>The internal queue is checked first because it represents <em>work already accepted into the engine</em>. Tuples currently passing between operators have priority over new tuples knocking at the door. This is the heart of the deadlock avoidance: a worker that cannot emit is, by construction, impossible (the internal queue is unbounded), but if it could be impossible, we would still want this read order, because it ensures that work-in-progress drains before new work is admitted.</p>
+<p>Said differently: this discipline gives priority to old work. If the admission queue is overwhelmed, sources will block. If the internal queue is overwhelmed, the workers will eventually drain it because nothing fights them for it.</p>
+<div class="callout callout-style-default callout-tip callout-titled" title="Real-system reference: how this differs in Flink">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Tip</span>Real-system reference: how this differs in Flink
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Apache Flink uses a different model. Each operator has a fixed pool of network buffers (<code>NetworkBufferPool</code>) <span class="citation" data-cites="flink-buffers">(<a href="../references.html#ref-flink-buffers" role="doc-biblioref">Hueske and Kalavri 2019</a>)</span>. When an upstream operator emits a record, it must obtain a buffer; if no buffers are available, it blocks. There is no separate “admission” queue: backpressure travels through the operator chain itself, and the source naturally blocks because everything between it and the source has filled up.</p>
+<p>Flink’s approach has the virtue of fine-grained, per-pipeline backpressure (one slow operator backpressures only its predecessors) but is intrinsically more complex: every operator has a buffer budget, every emit can block, every operator must be able to correctly handle blocking on emit.</p>
+<p>NebulaStream’s two-queue model is coarser. Backpressure is global to the engine, not per-operator. The simplification is the point.</p>
+</div>
+</div>
+<p>There is one subtle implementation note in <code>readElementAssumingItExists</code> that deserves attention: the <code>while</code> loop on <code>admission.read</code>. The loop is annotated <code>[[unlikely]]</code> and a comment explains why: the folly <code>MPMCQueue::read</code> method can spuriously fail under high contention even when the queue is non-empty. The semaphore <em>promises</em> us a task is available; the queue, briefly, lies about it. The alternative <code>readIfNotEmpty</code> does not lie but is — the comment tells us — significantly slower.</p>
+<p>This is a textbook example of the kind of trade-off you do not see unless you read the actual code. A design document, when summarising, will say “we read from the queue.” The implementation says “we sometimes spin on a contended dequeue because the alternative is too slow.” Both are true; the second is more useful.</p>
+<hr>
+</section>
+<section id="sec-semaphore-invariant" class="level2" data-number="15.5">
+<h2 data-number="15.5" class="anchored" data-anchor-id="sec-semaphore-invariant"><span class="header-section-number">15.5</span> 15.5 The semaphore invariant</h2>
+<p>The invariant printed in the comment on line 40 is doing the heavy lifting:</p>
+<blockquote class="blockquote">
+<p><code>INVARIANT: internal.size() + admission.size() &gt;= tasksAvailable</code></p>
+</blockquote>
+<p>The sum of the two queue sizes is at least equal to the semaphore counter. The semaphore counter is the engine’s notion of “how many tasks are available right now.” That count must never exceed the real number of tasks, or a worker thread will be told that work exists when in fact it does not, and the worker will spin or fail.</p>
+<p>The invariant is upheld by carefully ordering the operations on each write path. Both <code>addAdmissionTaskBlocking</code> and <code>addInternalTaskNonBlocking</code> release the semaphore <em>only after</em> the task has actually been enqueued. On the dequeue side, the worker first acquires the semaphore (blocking if the count is zero) and only then attempts to read the task. The acquire is the worker’s promise that a task exists. The semaphore is the only synchronisation between writer and reader visible to the queue’s API.</p>
+<p>This is the kind of invariant that, on paper, is a single line. In a production system, it is tested against thousands of randomised producer/consumer interleavings. NebulaStream’s <code>tests/TaskQueueTest.cpp</code> exercises this directly with a multi-producer, multi-consumer fuzzer that reasons about the order of writes vs.&nbsp;reads to expose any window in which the invariant could be violated.</p>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 15.1: run the queue's own tests">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 15.1: run the queue’s own tests
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Run the <code>TaskQueue</code> unit tests:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5"><pre class="sourceCode numberSource shell number-lines code-with-copy"><code class="sourceCode"><span id="cb5-1"><a href="#cb5-1"></a>ctest --test-dir cmake-build-debug -R "TaskQueueTest" --output-on-failure</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Open <code>nes-query-engine/tests/TaskQueueTest.cpp</code> and identify the <code>Task</code> type the test uses (a <code>std::tuple&lt;int, int, std::array&lt;std::byte, 142&gt;&gt;</code>). Why 142? Compare to the real <code>sizeof(NES::Task)</code> and explain the comment “142 is roughly the current task size.” Does the queue’s behaviour change if the task is much larger?</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-task-variant" class="level2" data-number="15.6">
+<h2 data-number="15.6" class="anchored" data-anchor-id="sec-task-variant"><span class="header-section-number">15.6</span> 15.6 The Task variant: not all tasks are workunits</h2>
+<p>We have been speaking as if “task” meant only “process this batch of tuples.” It does not. The task type is a <code>std::variant</code> of eight distinct task kinds, defined in <code>nes-query-engine/Task.hpp:195-203</code>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb6"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb6-1"><a href="#cb6-1"></a><span class="kw">using</span> Task <span class="op">=</span> <span class="bu">std::</span>variant<span class="op">&lt;</span></span>
+<span id="cb6-2"><a href="#cb6-2"></a>    WorkTask<span class="op">,</span></span>
+<span id="cb6-3"><a href="#cb6-3"></a>    StopQueryTask<span class="op">,</span></span>
+<span id="cb6-4"><a href="#cb6-4"></a>    StartQueryTask<span class="op">,</span></span>
+<span id="cb6-5"><a href="#cb6-5"></a>    FailSourceTask<span class="op">,</span></span>
+<span id="cb6-6"><a href="#cb6-6"></a>    StopSourceTask<span class="op">,</span></span>
+<span id="cb6-7"><a href="#cb6-7"></a>    PendingPipelineStopTask<span class="op">,</span></span>
+<span id="cb6-8"><a href="#cb6-8"></a>    StopPipelineTask<span class="op">,</span></span>
+<span id="cb6-9"><a href="#cb6-9"></a>    StartPipelineTask<span class="op">&gt;;</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><code>WorkTask</code> is the one we have been discussing: process tuples in a specific buffer through a specific pipeline node. The other seven control the <em>lifecycle</em> of queries, sources and pipelines. They flow through the same queue infrastructure as data because the engine has chosen to model “stop this pipeline” and “process this tuple” as the same kind of event: a thing the worker thread does next.</p>
+<p>The choice is unusual. Many engines model lifecycle changes as out-of-band signals — a separate control plane, sometimes a separate thread. NebulaStream multiplexes them onto the worker queue. The benefit is that lifecycle changes are naturally serialised against data: a <code>StopQueryTask</code> cannot accidentally race with the data it is trying to stop, because it is processed by a worker between two data tasks. The cost is that lifecycle work blocks behind data work, and the engine has to be careful to ensure lifecycle work is not starved.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Example 15.3: a query stop is just another task">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Example 15.3: a query stop is just another task
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>A user submits <code>STOP QUERY 42</code>. The frontend translates this into a <code>StopQueryTask</code> and writes it to the admission queue. The admission queue is currently full of <code>WorkTask</code>s for query 42. The <code>StopQueryTask</code> waits.</p>
+<p>A worker thread picks up the next admitted task — say, a <code>WorkTask</code> for query 42. It processes the tuples. Now the worker dequeues again, finds the <code>StopQueryTask</code>, and runs it: the query catalog is consulted, the pipelines are torn down, the sources are signalled to stop.</p>
+<p>The query stop is naturally serialised behind the work that was already in flight. There is no race between “process tuple 9 in query 42” and “stop query 42” because they happen on the same worker thread, in queue order.</p>
+</div>
+</div>
+<p>The most interesting member of the variant — the one that motivates the rest of this chapter — is <code>PendingPipelineStopTask</code>.</p>
+<hr>
+</section>
+<section id="sec-pending-pipeline-stop" class="level2" data-number="15.7">
+<h2 data-number="15.7" class="anchored" data-anchor-id="sec-pending-pipeline-stop"><span class="header-section-number">15.7</span> 15.7 Pending pipeline stops: when even two queues are not enough</h2>
+<p>Stopping a pipeline gracefully means waiting until no task currently references it. Tasks reference pipelines through a <code>weak_ptr</code>; the pipeline node is <code>shared_ptr</code>-owned by the engine, with task-local <code>weak_ptr</code> references. Until the last task referencing a pipeline has run to completion, the pipeline cannot be torn down without risking a use-after-free.</p>
+<p>The engine therefore models graceful pipeline shutdown as a polling task: a <code>PendingPipelineStopTask</code> that examines the pipeline’s reference count, and if any task is still referencing it, <em>re-emits itself</em> to be checked again later.</p>
+<p>This is the task type that broke the simple version of continuation. A <code>PendingPipelineStopTask</code> cannot make progress on its own; it can only make progress as other, unrelated tasks ahead of it in the queue finish.</p>
+<p>The current implementation handles this with a small backoff mechanism. Look at <code>QueryEngine.cpp:600-625</code>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb7"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb7-1"><a href="#cb7-1"></a><span class="co">// nes-query-engine/QueryEngine.cpp:608-624</span></span>
+<span id="cb7-2"><a href="#cb7-2"></a><span class="cf">if</span> <span class="op">(</span>pendingPipelineStop<span class="op">.</span>pipeline<span class="op">-&gt;</span>pendingTasks <span class="op">&gt;</span> <span class="dv">0</span><span class="op">)</span></span>
+<span id="cb7-3"><a href="#cb7-3"></a><span class="op">{</span></span>
+<span id="cb7-4"><a href="#cb7-4"></a>    ENGINE_LOG_TRACE<span class="op">(</span></span>
+<span id="cb7-5"><a href="#cb7-5"></a>        <span class="st">"Pipeline </span><span class="sc">{}</span><span class="st">-</span><span class="sc">{}</span><span class="st"> is still active: </span><span class="sc">{}</span><span class="st">. Seen for </span><span class="sc">{}</span><span class="st">th time"</span><span class="op">,</span></span>
+<span id="cb7-6"><a href="#cb7-6"></a>        pendingPipelineStop<span class="op">.</span>queryId<span class="op">,</span></span>
+<span id="cb7-7"><a href="#cb7-7"></a>        pendingPipelineStop<span class="op">.</span>pipeline<span class="op">-&gt;</span>id<span class="op">,</span></span>
+<span id="cb7-8"><a href="#cb7-8"></a>        pendingPipelineStop<span class="op">.</span>pipeline<span class="op">-&gt;</span>pendingTasks<span class="op">,</span></span>
+<span id="cb7-9"><a href="#cb7-9"></a>        pendingPipelineStop<span class="op">.</span>attempts<span class="op">);</span></span>
+<span id="cb7-10"><a href="#cb7-10"></a></span>
+<span id="cb7-11"><a href="#cb7-11"></a>    PendingPipelineStopTask repeatTask<span class="op">(</span></span>
+<span id="cb7-12"><a href="#cb7-12"></a>        pendingPipelineStop<span class="op">.</span>queryId<span class="op">,</span></span>
+<span id="cb7-13"><a href="#cb7-13"></a>        pendingPipelineStop<span class="op">.</span>pipeline<span class="op">,</span></span>
+<span id="cb7-14"><a href="#cb7-14"></a>        pendingPipelineStop<span class="op">.</span>attempts <span class="op">+</span> <span class="dv">1</span><span class="op">,</span></span>
+<span id="cb7-15"><a href="#cb7-15"></a>        <span class="bu">std::</span>move<span class="op">(</span>pendingPipelineStop<span class="op">.</span>callback<span class="op">));</span></span>
+<span id="cb7-16"><a href="#cb7-16"></a>    <span class="cf">if</span> <span class="op">(</span>pendingPipelineStop<span class="op">.</span>attempts <span class="op">&gt;=</span> PIPELINE_STOP_BACKOFF_THRESHOLD<span class="op">)</span></span>
+<span id="cb7-17"><a href="#cb7-17"></a>    <span class="op">{</span></span>
+<span id="cb7-18"><a href="#cb7-18"></a>        pool<span class="op">.</span>delayedTaskSubmitter<span class="op">.</span>submitTaskIn<span class="op">(</span></span>
+<span id="cb7-19"><a href="#cb7-19"></a>            <span class="bu">std::</span>move<span class="op">(</span>repeatTask<span class="op">),</span> PIPELINE_STOP_BACKOFF_INTERVAL<span class="op">);</span></span>
+<span id="cb7-20"><a href="#cb7-20"></a>    <span class="op">}</span></span>
+<span id="cb7-21"><a href="#cb7-21"></a>    <span class="cf">else</span></span>
+<span id="cb7-22"><a href="#cb7-22"></a>    <span class="op">{</span></span>
+<span id="cb7-23"><a href="#cb7-23"></a>        pool<span class="op">.</span>addInternalTask<span class="op">(</span><span class="bu">std::</span>move<span class="op">(</span>repeatTask<span class="op">));</span></span>
+<span id="cb7-24"><a href="#cb7-24"></a>    <span class="op">}</span></span>
+<span id="cb7-25"><a href="#cb7-25"></a>    <span class="cf">return</span> <span class="kw">false</span><span class="op">;</span></span>
+<span id="cb7-26"><a href="#cb7-26"></a><span class="op">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>The pattern is: try the immediate re-enqueue twice; on the third attempt, route through a <code>DelayedTaskSubmitter</code> that holds the task for <code>PIPELINE_STOP_BACKOFF_INTERVAL</code> (25 ms, defined two screens up at line 70) before re-introducing it. The constants are deliberately small. This is not exponential backoff. It is a single hop from “try again immediately” to “try again in 25 ms” — enough delay to let the admission queue drain a few tasks but not enough to noticeably affect shutdown latency.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Example 15.4: walking through a pipeline stop">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Example 15.4: walking through a pipeline stop
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>A pipeline <code>P</code> has three in-flight <code>WorkTask</code>s. A <code>StopQueryTask</code> for <code>P</code>’s query arrives; the engine processes it by emitting a <code>PendingPipelineStopTask</code> for <code>P</code>.</p>
+<p>The <code>PendingPipelineStopTask</code> is dequeued. Worker observes <code>pipeline-&gt;pendingTasks == 3</code>, increments <code>attempts</code> to 1, and re- emits the task to the internal queue. The task is now behind two remaining <code>WorkTask</code>s.</p>
+<p>Worker dequeues a <code>WorkTask</code>, processes it, decrements <code>pendingTasks</code> to 2. Then dequeues the <code>PendingPipelineStopTask</code> again. Sees 2 remaining, increments <code>attempts</code> to 2, re-emits.</p>
+<p>Now <code>attempts == 2 == PIPELINE_STOP_BACKOFF_THRESHOLD</code>. The task is routed through <code>DelayedTaskSubmitter</code> and held for 25 ms. During that window, the two remaining <code>WorkTask</code>s drain. When the delayed task is reinjected, <code>pendingTasks == 0</code>, the pipeline is torn down, the callback fires.</p>
+</div>
+</div>
+<p>A natural question: why a backoff at all? Why not let the <code>PendingPipelineStopTask</code> repeatedly re-enqueue itself until the references drop to zero?</p>
+<p>The answer is in the comment immediately above the threshold check (<code>QueryEngine.cpp:614-615</code>):</p>
+<blockquote class="blockquote">
+<p>If we have seen this pipeline for the third time, we will add some work from the admission queue to the internal queue. We need to do this, as the pipeline might be stuck in a deadlock as it is waiting for data from a source which has not been moved into the internal queue.</p>
+</blockquote>
+<p>A pipeline that is waiting for data from a source can only get that data via the admission queue. If the worker keeps spinning on <code>PendingPipelineStopTask</code> re-enqueues, no admission-queue task will ever advance, because the internal queue keeps refilling itself with the same self-emitting task. The 25 ms delay is not just polite; it is correctness. It guarantees that the worker’s gaze leaves the internal queue long enough for a source-emitted task to be promoted.</p>
+<p>This is a third deadlock possibility — a sub-case of P1 — that the two-queue design alone does not solve. It needs the <code>DelayedTaskSubmitter</code> as a dedicated escape hatch.</p>
+<hr>
+</section>
+<section id="sec-cancellation" class="level2" data-number="15.8">
+<h2 data-number="15.8" class="anchored" data-anchor-id="sec-cancellation"><span class="header-section-number">15.8</span> 15.8 Cancellation as a first-class concern</h2>
+<p>The two queues block in different ways. The admission queue blocks producers when it is full. The dequeue blocks consumers when both queues are empty. Either blocking call must be cancellable — the engine has to be able to shut down even if every queue is in a pathological state.</p>
+<p>NebulaStream uses C++20’s <code>std::stop_token</code> for this, plumbed through both blocking methods. Look at the dequeue path:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb8"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb8-1"><a href="#cb8-1"></a><span class="co">// nes-query-engine/TaskQueue.hpp:100-111</span></span>
+<span id="cb8-2"><a href="#cb8-2"></a><span class="bu">std::</span>optional<span class="op">&lt;</span>TaskType<span class="op">&gt;</span> getNextTaskBlocking<span class="op">(</span><span class="at">const</span> <span class="bu">std::</span>stop_token<span class="op">&amp;</span> stoken<span class="op">)</span></span>
+<span id="cb8-3"><a href="#cb8-3"></a><span class="op">{</span></span>
+<span id="cb8-4"><a href="#cb8-4"></a>    <span class="cf">while</span> <span class="op">(!</span>tasksAvailable<span class="op">.</span>try_acquire_for<span class="op">(</span>StopTokenCheckInterval<span class="op">))</span></span>
+<span id="cb8-5"><a href="#cb8-5"></a>    <span class="op">{</span></span>
+<span id="cb8-6"><a href="#cb8-6"></a>        <span class="cf">if</span> <span class="op">(</span>stoken<span class="op">.</span>stop_requested<span class="op">())</span></span>
+<span id="cb8-7"><a href="#cb8-7"></a>        <span class="op">{</span></span>
+<span id="cb8-8"><a href="#cb8-8"></a>            <span class="cf">return</span> <span class="bu">std::</span>nullopt<span class="op">;</span></span>
+<span id="cb8-9"><a href="#cb8-9"></a>        <span class="op">}</span></span>
+<span id="cb8-10"><a href="#cb8-10"></a>    <span class="op">}</span></span>
+<span id="cb8-11"><a href="#cb8-11"></a></span>
+<span id="cb8-12"><a href="#cb8-12"></a>    <span class="cf">return</span> readElementAssumingItExists<span class="op">();</span></span>
+<span id="cb8-13"><a href="#cb8-13"></a><span class="op">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>The semaphore is acquired <em>with a timeout</em> — <code>StopTokenCheckInterval</code>, defined as 100 ms. Each timeout, the thread checks the stop token. If shutdown has been requested, the method returns an empty optional and the worker exits. Otherwise, it tries to acquire again.</p>
+<p>The 100 ms interval is the maximum cancellation latency a worker thread experiences when it is waiting for work. It is short enough that a user-initiated shutdown feels instant. It is long enough that the polling cost is invisible: ten checks per second per thread is nothing.</p>
+<p>The same pattern guards the producer side. <code>addAdmissionTaskBlocking</code> loops <code>tryWriteUntil</code> with the same 100 ms interval, returning <code>false</code> if the stop token fires before the write succeeds.</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb9"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb9-1"><a href="#cb9-1"></a><span class="co">// nes-query-engine/TaskQueue.hpp:71-85</span></span>
+<span id="cb9-2"><a href="#cb9-2"></a><span class="kw">template</span> <span class="op">&lt;</span><span class="kw">typename</span> T <span class="op">=</span> TaskType<span class="op">&gt;</span></span>
+<span id="cb9-3"><a href="#cb9-3"></a><span class="dt">bool</span> addAdmissionTaskBlocking<span class="op">(</span><span class="at">const</span> <span class="bu">std::</span>stop_token<span class="op">&amp;</span> stoken<span class="op">,</span> T<span class="op">&amp;&amp;</span> task<span class="op">)</span></span>
+<span id="cb9-4"><a href="#cb9-4"></a><span class="op">{</span></span>
+<span id="cb9-5"><a href="#cb9-5"></a>    <span class="cf">while</span> <span class="op">(!</span>stoken<span class="op">.</span>stop_requested<span class="op">())</span></span>
+<span id="cb9-6"><a href="#cb9-6"></a>    <span class="op">{</span></span>
+<span id="cb9-7"><a href="#cb9-7"></a>        <span class="cf">if</span> <span class="op">(</span>admission<span class="op">.</span>tryWriteUntil<span class="op">(</span></span>
+<span id="cb9-8"><a href="#cb9-8"></a>                <span class="bu">std::</span>chrono::steady_clock::now<span class="op">()</span> <span class="op">+</span> StopTokenCheckInterval<span class="op">,</span></span>
+<span id="cb9-9"><a href="#cb9-9"></a>                <span class="bu">std::</span>forward<span class="op">&lt;</span>T<span class="op">&gt;(</span>task<span class="op">)))</span></span>
+<span id="cb9-10"><a href="#cb9-10"></a>        <span class="op">{</span></span>
+<span id="cb9-11"><a href="#cb9-11"></a>            tasksAvailable<span class="op">.</span>release<span class="op">();</span></span>
+<span id="cb9-12"><a href="#cb9-12"></a>            <span class="cf">return</span> <span class="kw">true</span><span class="op">;</span></span>
+<span id="cb9-13"><a href="#cb9-13"></a>        <span class="op">}</span></span>
+<span id="cb9-14"><a href="#cb9-14"></a>    <span class="op">}</span></span>
+<span id="cb9-15"><a href="#cb9-15"></a>    <span class="cf">return</span> <span class="kw">false</span><span class="op">;</span></span>
+<span id="cb9-16"><a href="#cb9-16"></a><span class="op">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>There is one piece of nuance worth remarking on. The dequeue method’s documentation states: <em>“The method prioritizes reading over cancellation. This implies, if a read is non-blocking, it succeeds regardless of the state of the stop token.”</em> That is, a worker that finds work available will process it even during shutdown, rather than exiting with the work unfinished. This is a design choice in favour of draining over abandonment. It pairs naturally with the <code>PendingPipelineStopTask</code> mechanism: shutdown processes shut down gracefully through the same queue, alongside the data they are tearing down.</p>
+<div class="callout callout-style-default callout-tip callout-titled" title="Real-system reference: Spark Streaming and graceful stop">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Tip</span>Real-system reference: Spark Streaming and graceful stop
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Spark Structured Streaming similarly distinguishes “stop now” from “stop gracefully” via the <code>gracefulStop</code> parameter on <code>StreamingQuery.stop()</code> <span class="citation" data-cites="spark-graceful-stop">(<a href="../references.html#ref-spark-graceful-stop" role="doc-biblioref">Armbrust et al. 2018</a>)</span>. The mechanism differs — Spark drains the current micro-batch and then halts — but the underlying principle is the same: producers and consumers both need a cooperative cancellation signal, and “drain in flight, then exit” is almost always the right default.</p>
+<p>NebulaStream’s choice to model graceful stop as a first-class <code>PendingPipelineStopTask</code> traveling through the worker queue (rather than as out-of-band lifecycle state) makes the draining semantics natural to enforce.</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-worker-loop" class="level2" data-number="15.9">
+<h2 data-number="15.9" class="anchored" data-anchor-id="sec-worker-loop"><span class="header-section-number">15.9</span> 15.9 Putting it together: the worker loop</h2>
+<p>We have now seen all the pieces. Let us assemble them into a single mental model of the worker loop.</p>
+<div id="fig-worker-loop" class="quarto-float quarto-figure quarto-figure-center anchored">
+<figure class="quarto-float quarto-float-fig figure">
+<div aria-describedby="fig-worker-loop-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<img src="../figures/tikz/ch15-worker-loop.svg" class="img-fluid figure-img" style="width:90.0%">
+</div>
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-worker-loop-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;15.1: The worker thread loop. The wait at top is bounded by <code>StopTokenCheckInterval</code> (100 ms) so cancellation has bounded latency. Every code path eventually returns to the wait, except the <code>Worker exits</code> exit on shutdown.
+</figcaption>
+</figure>
+</div>
+<p>Each loop iteration does at most one of: (a) acquire and process a single task, (b) time out and check for shutdown. There is no spinning, no polling, no busy work between tasks. The only place a worker thread waits is on <code>tasksAvailable.try_acquire_for</code>, and that wait is bounded by <code>StopTokenCheckInterval</code>.</p>
+<p>Source threads and external producers run a parallel loop with a different shape: they emit tasks via <code>addAdmissionTaskBlocking</code> and their throughput is bounded by the admission queue’s capacity.</p>
+<p>The two loops meet at one point: the semaphore. The semaphore is the only piece of synchronisation that workers and producers share. The queues themselves are lock-free (folly’s MPMC and UMPMC are both implemented atop atomics, with no mutexes on the hot paths). The combination — lock-free data structures synchronised by a counting semaphore that doubles as a cancellation point — is what gives the scheduler its blend of low overhead and clean shutdown semantics.</p>
+<div class="callout callout-style-default callout-tip callout-titled" title="Real-system reference: Materialize and timely dataflow">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Tip</span>Real-system reference: Materialize and timely dataflow
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Materialize is built on differential dataflow <span class="citation" data-cites="differential-dataflow">(<a href="../references.html#ref-differential-dataflow" role="doc-biblioref">McSherry et al. 2013</a>)</span>, which uses a fundamentally different scheduling model: a <em>frontier</em> of timestamps that operators advance cooperatively, with no central queue. Each worker thread owns a slice of the operator graph and runs operators round-robin against their pending work.</p>
+<p>Timely dataflow’s strength is fine-grained progress reasoning; NebulaStream’s strength (with its central two-queue scheduler) is operational simplicity. The two designs sit on opposite ends of the “how distributed should the scheduler itself be” spectrum.</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-non-goals" class="level2" data-number="15.10">
+<h2 data-number="15.10" class="anchored" data-anchor-id="sec-non-goals"><span class="header-section-number">15.10</span> 15.10 What this design does not do</h2>
+<p>It is worth being explicit about what the two-queue scheduler does <em>not</em> attempt.</p>
+<p><strong>It does not prioritise tasks.</strong> The design document is explicit on this point <span class="citation" data-cites="nes-task-queue-doc">(<a href="../references.html#ref-nes-task-queue-doc" role="doc-biblioref">NebulaStream contributors 2024</a>, §Scope)</span>: “It does not perform any prioritization of tasks in terms of latency or throughput, but prevents deadlocks.” A latency-sensitive query and a throughput- oriented query share the same queue and are processed in arrival order. If a future version of the engine wants per-query scheduling policies, the queue infrastructure will need to be replaced or augmented; the current design is silent on the question.</p>
+<p><strong>It does not implement work stealing in the strict sense.</strong> Work stealing, as in Cilk or Tokio’s multi-threaded executor, gives each worker a private deque and lets idle workers steal from busy ones’ deques. NebulaStream has a single shared queue (well, two), and workers race to dequeue from it. The behaviour is similar — idle workers always pick up available work — but the mechanism is classical shared-queue work distribution, not work stealing.</p>
+<p><strong>It does not model per-pipeline backpressure.</strong> As we saw in the Flink sidebar, some engines push backpressure through the operator graph itself. NebulaStream’s backpressure is global: when the admission queue is full, <em>all</em> sources block, regardless of which pipeline is the bottleneck. A slow downstream operator backpressures fast upstream sources, but only because the workers are busy and cannot drain fast enough — there is no targeted signal to throttle a specific source. This is fine for the engine’s current scale; if NebulaStream grows to thousands of concurrent queries with very heterogeneous resource needs, it will likely need a more discriminating mechanism.</p>
+<p><strong>It is per-worker, not cross-worker.</strong> Each NebulaStream worker has its own pair of queues and its own pool of worker threads. In a distributed deployment (Chapter 19), task scheduling is local to each worker; the network channels between workers are the only inter-worker coordination, and they speak in <code>TupleBuffer</code>s, not in <code>Task</code>s. Backpressure across workers travels through the network channels (Chapter 19’s <code>backpressure{Upper,Lower}Threshold</code> settings) rather than through the task queue. This is one of the cleaner consequences of the decomposition strategy: a per-worker scheduler has no global state to share, which is exactly what makes adding more workers a question of “spin one up” rather than “reconfigure the scheduler.”</p>
+<p>These are deliberate non-goals. The two-queue design is, by C++ standards of fanciness, almost embarrassingly modest. Two folly queues. One semaphore. One stop token. About two hundred lines of code, including tests. The lesson is not that the scheduler is small because the problem is small. The lesson is that the scheduler is small because the problems it does not solve are handled elsewhere — the buffer manager handles memory pressure, the optimiser handles operator placement, the source registry handles source-specific backpressure. The scheduler does one thing: it gets work to workers without deadlocking.</p>
+<hr>
+</section>
+<section id="sec-summary" class="level2" data-number="15.11">
+<h2 data-number="15.11" class="anchored" data-anchor-id="sec-summary"><span class="header-section-number">15.11</span> Summary</h2>
+<p>A bounded shared task queue is the natural starting point for a scheduler in a stream processing engine, but it leaves you with two deadlock surfaces: worker-emission deadlock (P1) and source-flooding deadlock (P2).</p>
+<p>NebulaStream solves them with a structural separation: two queues, each with different blocking semantics. The internal queue is unbounded and never blocks a worker on emit, eliminating P1. The admission queue is bounded and blocks producers, providing the backpressure that keeps the engine from running out of memory while preventing source floods from starving worker emissions, eliminating P2. The two queues are unified for the worker via a <code>std::counting_semaphore</code> whose count is the engine’s authoritative notion of “work available.”</p>
+<p>Cancellation is layered on top of both blocking calls via a 100 ms poll on a <code>std::stop_token</code>, which gives shutdown a bounded latency without measurable steady-state cost.</p>
+<p>A subtle third failure mode — a self-emitting <code>PendingPipelineStopTask</code> that monopolises the internal queue — is handled by a small backoff mechanism that routes the task through a <code>DelayedTaskSubmitter</code> after two failed attempts, ensuring source-emitted work in the admission queue gets a chance to advance.</p>
+<p>The design is deliberately minimal. Per-task prioritisation, per-pipeline backpressure, and work stealing are all deferred to other parts of the engine or to future work. What is left is small, fast, and — most important — provably free of the two deadlock surfaces that motivated its existence.</p>
+<hr>
+</section>
+<section id="sec-exercises" class="level2" data-number="15.12">
+<h2 data-number="15.12" class="anchored" data-anchor-id="sec-exercises"><span class="header-section-number">15.12</span> Reading exercises</h2>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 15.1: invariant under load">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 15.1: invariant under load
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Run <code>TaskQueueTest</code>’s multi-producer/multi-consumer fuzzer:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb10"><pre class="sourceCode numberSource shell number-lines code-with-copy"><code class="sourceCode"><span id="cb10-1"><a href="#cb10-1"></a>ctest --test-dir cmake-build-debug -R "TaskQueueTest" \</span>
+<span id="cb10-2"><a href="#cb10-2"></a>    --output-on-failure</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Read <code>nes-query-engine/tests/TaskQueueTest.cpp</code>. The test uses a synthetic <code>Task</code> of size 142 bytes. Modify the test to use a task of size 16 bytes and another of size 4096 bytes. Does the invariant <code>internal.size() + admission.size() &gt;= tasksAvailable</code> still hold under contention? Use ThreadSanitizer (<code>-DCMAKE_BUILD_TYPE=Debug</code> with <code>-DNES_USE_SANITIZER=thread</code>) and look for any reported races.</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 15.2: P1 simulation">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 15.2: P1 simulation
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Modify a copy of <code>TaskQueue.hpp</code> to make the internal queue <em>bounded</em> (replace <code>folly::UMPMCQueue</code> with <code>folly::MPMCQueue&lt;TaskType&gt;</code> of, say, capacity 16). Make <code>addInternalTaskNonBlocking</code> return <code>bool</code> and have it fail when full. Run the existing test suite. How many tests fail? What pattern do the failures show? You should not attempt to make the code “work” — the goal is to feel the deadlock that the unbounded design prevents.</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 15.3: pending pipeline stop in flight">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 15.3: pending pipeline stop in flight
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Run a multi-stream join systest with <code>ENGINE_LOG_TRACE</code> enabled and grep for <code>Pipeline ... is still active: ... Seen for ...th time</code> in the log. How often, in a typical join with multiple input streams, is a <code>PendingPipelineStopTask</code> re-emitted before the pipeline can be stopped? What does that number tell you about the typical fan-out of the join probe?</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb11"><pre class="sourceCode numberSource shell number-lines code-with-copy"><code class="sourceCode"><span id="cb11-1"><a href="#cb11-1"></a>cmake-build-debug/systest/systest \</span>
+<span id="cb11-2"><a href="#cb11-2"></a>    -t nes-systests/operator/join/JoinMultipleStreams.test:1 \</span>
+<span id="cb11-3"><a href="#cb11-3"></a>    -- --worker.default_query_execution.execution_mode=INTERPRETER</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Inspect the resulting log file under <code>cmake-build-debug/systest-run</code>.</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 15.4: cancellation latency">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 15.4: cancellation latency
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Start <code>nes-single-node-worker</code> and submit a long-running query via <code>nes-repl</code>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb12"><pre class="sourceCode numberSource shell number-lines code-with-copy"><code class="sourceCode"><span id="cb12-1"><a href="#cb12-1"></a>cmake-build-debug/nes-single-node-worker/nes-single-node-worker</span>
+<span id="cb12-2"><a href="#cb12-2"></a># in another terminal</span>
+<span id="cb12-3"><a href="#cb12-3"></a>cmake-build-debug/nes-frontend/apps/repl/nes-repl -s localhost:8080 \</span>
+<span id="cb12-4"><a href="#cb12-4"></a>    &lt; a-long-query.sql</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Send <code>SIGINT</code> to the worker. Measure the time between the signal and process exit using <code>time</code>. Where does the delay come from? Identify the wait that dominates the latency (hint: it is bounded by <code>StopTokenCheckInterval</code> per blocked thread). What would you have to change to bring it below 10 ms?</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 15.5: replace the semaphore">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 15.5: replace the semaphore
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>The <code>TaskQueue</code> uses a <code>std::counting_semaphore</code> to coordinate producers and consumers. Could you replace it with a condition variable and a counter? Sketch the implementation. What invariants become harder to maintain? What additional state do you need? Why might the authors have preferred the semaphore?</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-references" class="level2" data-number="15.13">
+<h2 data-number="15.13" class="anchored" data-anchor-id="sec-references"><span class="header-section-number">15.13</span> References</h2>
+<p>This chapter draws on:</p>
+<ul>
+<li><p><strong>NebulaStream design document.</strong> <em>Task Queues in the Query Engine.</em> In-tree at <code>docs/technical/QueryEngine_TaskQueue.md</code>. The originator of the P1/P2 framing used throughout this chapter.</p></li>
+<li><p><strong>NebulaStream source.</strong> Commit <code>cd3ef68c73</code>. Specifically:</p>
+<ul>
+<li><code>nes-query-engine/TaskQueue.hpp</code></li>
+<li><code>nes-query-engine/Task.hpp</code></li>
+<li><code>nes-query-engine/QueryEngine.cpp</code> (the worker loop and <code>PendingPipelineStop</code> handling around line 600)</li>
+<li><code>nes-query-engine/Callback.hpp</code></li>
+<li><code>nes-query-engine/DelayedTaskSubmitter.hpp</code></li>
+<li><code>nes-query-engine/tests/TaskQueueTest.cpp</code></li>
+</ul></li>
+<li><p><strong>Folly.</strong> F. Bachrach et al.&nbsp;<em>Folly: Facebook open-source library</em>. <code>folly::MPMCQueue</code> and <code>folly::UMPMCQueue</code> are the underlying queue primitives. See <code>https://github.com/facebook/folly</code>.</p></li>
+<li><p><strong>Flink network buffers.</strong> F. Hueske and V. Kalavri. <em>Stream Processing with Apache Flink</em>, 1st ed.&nbsp;O’Reilly Media, 2019, ch.&nbsp;9, “Implementing Streaming Data Pipelines.”</p></li>
+<li><p><strong>Spark Structured Streaming graceful stop.</strong> M. Armbrust et al. <em>Structured Streaming: A Declarative API for Real-Time Applications in Apache Spark.</em> SIGMOD 2018.</p></li>
+<li><p><strong>Differential and timely dataflow.</strong> F. McSherry, M. Isard, D. Murray. <em>Differential Dataflow.</em> CIDR 2013. And: D. Murray, F. McSherry et al. <em>Naiad: A Timely Dataflow System.</em> SOSP 2013.</p></li>
+<li><p><strong>C++20 stop token.</strong> ISO/IEC 14882:2020. The <code>std::stop_token</code> and <code>std::counting_semaphore</code> types are from <code>&lt;stop_token&gt;</code> and <code>&lt;semaphore&gt;</code> respectively.</p></li>
+<li><p><strong>Continuation-style scheduler design.</strong> As proposed in NebulaStream’s design document (above). Note that the technique was superseded by the unbounded internal queue in the current implementation; the technique remains relevant if the queue is ever rebounded.</p></li>
+<li><p><strong>Variant-based task representation.</strong> N. Josuttis. <em>The C++ Standard Library</em>, 2nd ed.&nbsp;Addison-Wesley, 2012, ch.&nbsp;5 (“Utilities”) for the general mechanics of <code>std::variant</code> and <code>std::visit</code>.</p></li>
+</ul>
+
+
+<div id="refs" class="references csl-bib-body hanging-indent" role="list" style="display: none">
+<div id="ref-spark-graceful-stop" class="csl-entry" role="listitem">
+Armbrust, Michael, Tathagata Das, Joseph Torres, et al. 2018. <span>“Structured Streaming: A Declarative <span>API</span> for Real-Time Applications in Apache Spark.”</span> <em>Proceedings of the 2018 International Conference on Management of Data (<span>SIGMOD</span>)</em>, 601–13.
+</div>
+<div id="ref-flink-buffers" class="csl-entry" role="listitem">
+Hueske, Fabian, and Vasiliki Kalavri. 2019. <em>Stream Processing with Apache Flink</em>. 1st ed. O’Reilly Media.
+</div>
+<div id="ref-differential-dataflow" class="csl-entry" role="listitem">
+McSherry, Frank, Derek G. Murray, Rebecca Isaacs, and Michael Isard. 2013. <span>“Differential Dataflow.”</span> <em>Conference on Innovative Data Systems Research (<span>CIDR</span>)</em>.
+</div>
+<div id="ref-nes-task-queue-doc" class="csl-entry" role="listitem">
+NebulaStream contributors. 2024. <em>Task Queues in the Query Engine</em>. <a href="https://github.com/nebulastream/nebulastream">https://github.com/nebulastream/nebulastream</a>.
+</div>
+</div>
+</section>
+
+</main> <!-- /main -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    // Ensure there is a toggle, if there isn't float one in the top right
+    if (window.document.querySelector('.quarto-color-scheme-toggle') === null) {
+      const a = window.document.createElement('a');
+      a.classList.add('top-right');
+      a.classList.add('quarto-color-scheme-toggle');
+      a.href = "";
+      a.onclick = function() { try { window.quartoToggleColorScheme(); } catch {} return false; };
+      const i = window.document.createElement("i");
+      i.classList.add('bi');
+      a.appendChild(i);
+      window.document.body.appendChild(a);
+    }
+    setColorSchemeToggle(hasAlternateSentinel())
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/nebula\.stream");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+            // target, if specified
+            link.setAttribute("target", "_blank");
+            if (link.getAttribute("rel") === null) {
+              link.setAttribute("rel", "noopener");
+            }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+<nav class="page-navigation">
+  <div class="nav-page nav-page-previous">
+      <a href="../chapters/14-task-execution.html" class="pagination-link" aria-label="Task-Based Execution Model">
+        <i class="bi bi-arrow-left-short"></i> <span class="nav-page-text"><span class="chapter-number">14</span>&nbsp; <span class="chapter-title">Task-Based Execution Model</span></span>
+      </a>          
+  </div>
+  <div class="nav-page nav-page-next">
+      <a href="../chapters/16-stateful-operators.html" class="pagination-link" aria-label="Stateful Operators and State Management">
+        <span class="nav-page-text"><span class="chapter-number">16</span>&nbsp; <span class="chapter-title">Stateful Operators and State Management</span></span> <i class="bi bi-arrow-right-short"></i>
+      </a>
+  </div>
+</nav>
+</div> <!-- /content -->
+<footer class="footer">
+  <div class="nav-footer">
+    <div class="nav-footer-left">
+<p>© CC BY-SA — code excerpts under Apache-2.0 from NebulaStream</p>
+</div>   
+    <div class="nav-footer-center">
+<p><a href="https://nebula.stream">nebula.stream</a> · <a href="https://github.com/nebulastream/nebulastream">github</a></p>
+<div class="toc-actions d-sm-block d-md-none"><ul><li><a href="https://github.com/nebulastream/nebulastream-book/edit/main/chapters/15-two-queue-scheduler.qmd" class="toc-action"><i class="bi bi-github"></i>Edit this page</a></li><li><a href="https://github.com/nebulastream/nebulastream-book/issues/new" class="toc-action"><i class="bi empty"></i>Report an issue</a></li></ul></div></div>
+    <div class="nav-footer-right">
+<p>Built with <a href="https://quarto.org">Quarto</a></p>
+</div>
+  </div>
+</footer>
+
+
+
+
+<script src="../site_libs/quarto-html/zenscroll-min.js"></script>
+</body></html>

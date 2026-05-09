@@ -1,0 +1,1271 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.9.37">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>10&nbsp; Physical Lowering and Operator Choice – NebulaStream: A Stream Processing Engine from the Inside Out</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="../site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="../site_libs/quarto-nav/headroom.min.js"></script>
+<script src="../site_libs/clipboard/clipboard.min.js"></script>
+<script src="../site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="../site_libs/quarto-search/fuse.min.js"></script>
+<script src="../site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="../">
+<link href="../chapters/11-pipelining.html" rel="next">
+<link href="../chapters/09-rule-based-optimization.html" rel="prev">
+<link href="../figures/favicon.ico" rel="icon">
+<script src="../site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="../site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="../site_libs/quarto-html/popper.min.js"></script>
+<script src="../site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="../site_libs/quarto-html/anchor.min.js"></script>
+<link href="../site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-f5b116b226ab7871a339bcb27e385d4f.css" rel="stylesheet" class="quarto-color-scheme" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-dark-fa7fa037caeb5c295dcabee9de8bbbbc.css" rel="stylesheet" class="quarto-color-scheme quarto-color-alternate" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-f5b116b226ab7871a339bcb27e385d4f.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
+<script src="../site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="../site_libs/bootstrap/bootstrap-59cd90b3a31d59781837685af5616a03.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-7555ce834b751ef39c6101133797c128.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-59cd90b3a31d59781837685af5616a03.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "location": "sidebar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "start",
+  "type": "textbox",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+<style>html{ scroll-behavior: smooth; }</style>
+
+
+</head>
+
+<body class="nav-sidebar docked quarto-light"><script id="quarto-html-before-body" type="application/javascript">
+    const toggleBodyColorMode = (bsSheetEl) => {
+      const mode = bsSheetEl.getAttribute("data-mode");
+      const bodyEl = window.document.querySelector("body");
+      if (mode === "dark") {
+        bodyEl.classList.add("quarto-dark");
+        bodyEl.classList.remove("quarto-light");
+      } else {
+        bodyEl.classList.add("quarto-light");
+        bodyEl.classList.remove("quarto-dark");
+      }
+    }
+    const toggleBodyColorPrimary = () => {
+      const bsSheetEl = window.document.querySelector("link#quarto-bootstrap:not([rel=disabled-stylesheet])");
+      if (bsSheetEl) {
+        toggleBodyColorMode(bsSheetEl);
+      }
+    }
+    const setColorSchemeToggle = (alternate) => {
+      const toggles = window.document.querySelectorAll('.quarto-color-scheme-toggle');
+      for (let i=0; i < toggles.length; i++) {
+        const toggle = toggles[i];
+        if (toggle) {
+          if (alternate) {
+            toggle.classList.add("alternate");
+          } else {
+            toggle.classList.remove("alternate");
+          }
+        }
+      }
+    };
+    const toggleColorMode = (alternate) => {
+      // Switch the stylesheets
+      const primaryStylesheets = window.document.querySelectorAll('link.quarto-color-scheme:not(.quarto-color-alternate)');
+      const alternateStylesheets = window.document.querySelectorAll('link.quarto-color-scheme.quarto-color-alternate');
+      manageTransitions('#quarto-margin-sidebar .nav-link', false);
+      if (alternate) {
+        // note: dark is layered on light, we don't disable primary!
+        enableStylesheet(alternateStylesheets);
+        for (const sheetNode of alternateStylesheets) {
+          if (sheetNode.id === "quarto-bootstrap") {
+            toggleBodyColorMode(sheetNode);
+          }
+        }
+      } else {
+        disableStylesheet(alternateStylesheets);
+        enableStylesheet(primaryStylesheets)
+        toggleBodyColorPrimary();
+      }
+      manageTransitions('#quarto-margin-sidebar .nav-link', true);
+      // Switch the toggles
+      setColorSchemeToggle(alternate)
+      // Hack to workaround the fact that safari doesn't
+      // properly recolor the scrollbar when toggling (#1455)
+      if (navigator.userAgent.indexOf('Safari') > 0 && navigator.userAgent.indexOf('Chrome') == -1) {
+        manageTransitions("body", false);
+        window.scrollTo(0, 1);
+        setTimeout(() => {
+          window.scrollTo(0, 0);
+          manageTransitions("body", true);
+        }, 40);
+      }
+    }
+    const disableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        stylesheet.rel = 'disabled-stylesheet';
+      }
+    }
+    const enableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        if(stylesheet.rel !== 'stylesheet') { // for Chrome, which will still FOUC without this check
+          stylesheet.rel = 'stylesheet';
+        }
+      }
+    }
+    const manageTransitions = (selector, allowTransitions) => {
+      const els = window.document.querySelectorAll(selector);
+      for (let i=0; i < els.length; i++) {
+        const el = els[i];
+        if (allowTransitions) {
+          el.classList.remove('notransition');
+        } else {
+          el.classList.add('notransition');
+        }
+      }
+    }
+    const isFileUrl = () => {
+      return window.location.protocol === 'file:';
+    }
+    const hasAlternateSentinel = () => {
+      let styleSentinel = getColorSchemeSentinel();
+      if (styleSentinel !== null) {
+        return styleSentinel === "alternate";
+      } else {
+        return false;
+      }
+    }
+    const setStyleSentinel = (alternate) => {
+      const value = alternate ? "alternate" : "default";
+      if (!isFileUrl()) {
+        window.localStorage.setItem("quarto-color-scheme", value);
+      } else {
+        localAlternateSentinel = value;
+      }
+    }
+    const getColorSchemeSentinel = () => {
+      if (!isFileUrl()) {
+        const storageValue = window.localStorage.getItem("quarto-color-scheme");
+        return storageValue != null ? storageValue : localAlternateSentinel;
+      } else {
+        return localAlternateSentinel;
+      }
+    }
+    const toggleGiscusIfUsed = (isAlternate, darkModeDefault) => {
+      const baseTheme = document.querySelector('#giscus-base-theme')?.value ?? 'light';
+      const alternateTheme = document.querySelector('#giscus-alt-theme')?.value ?? 'dark';
+      let newTheme = '';
+      if(authorPrefersDark) {
+        newTheme = isAlternate ? baseTheme : alternateTheme;
+      } else {
+        newTheme = isAlternate ? alternateTheme : baseTheme;
+      }
+      const changeGiscusTheme = () => {
+        // From: https://github.com/giscus/giscus/issues/336
+        const sendMessage = (message) => {
+          const iframe = document.querySelector('iframe.giscus-frame');
+          if (!iframe) return;
+          iframe.contentWindow.postMessage({ giscus: message }, 'https://giscus.app');
+        }
+        sendMessage({
+          setConfig: {
+            theme: newTheme
+          }
+        });
+      }
+      const isGiscussLoaded = window.document.querySelector('iframe.giscus-frame') !== null;
+      if (isGiscussLoaded) {
+        changeGiscusTheme();
+      }
+    };
+    const authorPrefersDark = false;
+    const darkModeDefault = authorPrefersDark;
+      document.querySelector('link#quarto-text-highlighting-styles.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+      document.querySelector('link#quarto-bootstrap.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+    let localAlternateSentinel = darkModeDefault ? 'alternate' : 'default';
+    // Dark / light mode switch
+    window.quartoToggleColorScheme = () => {
+      // Read the current dark / light value
+      let toAlternate = !hasAlternateSentinel();
+      toggleColorMode(toAlternate);
+      setStyleSentinel(toAlternate);
+      toggleGiscusIfUsed(toAlternate, darkModeDefault);
+      window.dispatchEvent(new Event('resize'));
+    };
+    // Switch to dark mode if need be
+    if (hasAlternateSentinel()) {
+      toggleColorMode(true);
+    } else {
+      toggleColorMode(false);
+    }
+  </script>
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top">
+  <nav class="quarto-secondary-nav">
+    <div class="container-fluid d-flex">
+      <button type="button" class="quarto-btn-toggle btn" data-bs-toggle="collapse" role="button" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+        <i class="bi bi-layout-text-sidebar-reverse"></i>
+      </button>
+        <nav class="quarto-page-breadcrumbs" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../chapters/09-rule-based-optimization.html">Optimization and Compilation</a></li><li class="breadcrumb-item"><a href="../chapters/10-physical-lowering.html"><span class="chapter-number">10</span>&nbsp; <span class="chapter-title">Physical Lowering and Operator Choice</span></a></li></ol></nav>
+        <a class="flex-grow-1" role="navigation" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">      
+        </a>
+      <button type="button" class="btn quarto-search-button" aria-label="Search" onclick="window.quartoOpenSearch();">
+        <i class="bi bi-search"></i>
+      </button>
+    </div>
+  </nav>
+</header>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article">
+<!-- sidebar -->
+  <nav id="quarto-sidebar" class="sidebar collapse collapse-horizontal quarto-sidebar-collapse-item sidebar-navigation docked overflow-auto">
+    <div class="pt-lg-2 mt-2 text-left sidebar-header sidebar-header-stacked">
+      <a href="../index.html" class="sidebar-logo-link">
+      <img src="../figures/neslogo.png" alt="" class="sidebar-logo light-content py-0 d-lg-inline d-none">
+      <img src="../figures/neslogo.png" alt="" class="sidebar-logo dark-content py-0 d-lg-inline d-none">
+      </a>
+    <div class="sidebar-title mb-0 py-0">
+      <a href="../">NebulaStream Internals</a> 
+        <div class="sidebar-tools-main tools-wide">
+    <a href="https://github.com/nebulastream/nebulastream-book" title="Source Code" class="quarto-navigation-tool px-1" aria-label="Source Code"><i class="bi bi-github"></i></a>
+  <a href="" class="quarto-color-scheme-toggle quarto-navigation-tool  px-1" onclick="window.quartoToggleColorScheme(); return false;" title="Toggle dark mode"><i class="bi"></i></a>
+  <a href="" class="quarto-reader-toggle quarto-navigation-tool px-1" onclick="window.quartoToggleReader(); return false;" title="Toggle reader mode">
+  <div class="quarto-reader-toggle-btn">
+  <i class="bi"></i>
+  </div>
+</a>
+</div>
+    </div>
+      </div>
+        <div class="mt-2 flex-shrink-0 align-items-center">
+        <div class="sidebar-search">
+        <div id="quarto-search" class="" title="Search"></div>
+        </div>
+        </div>
+    <div class="sidebar-menu-container"> 
+    <ul class="list-unstyled mt-1">
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../index.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Preface</span></a>
+  </div>
+</li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-1" role="navigation" aria-expanded="true">
+ <span class="menu-text">Foundations</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-1" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-1" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/01-why-streaming.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">1</span>&nbsp; <span class="chapter-title">Why Stream Processing? Why Another Engine?</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/02-system-tour.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">2</span>&nbsp; <span class="chapter-title">System Tour: From SQL to Native Code</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/03-data-model.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">3</span>&nbsp; <span class="chapter-title">Data Model and Type System</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/04-buffer-management.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">4</span>&nbsp; <span class="chapter-title">Buffer Management and Memory Layout</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-2" role="navigation" aria-expanded="true">
+ <span class="menu-text">The Query Frontier</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-2" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-2" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/05-query-language.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">5</span>&nbsp; <span class="chapter-title">The Query Language and Parser</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/06-logical-algebra.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">6</span>&nbsp; <span class="chapter-title">Logical Operator Algebra</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/07-watermarks.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">7</span>&nbsp; <span class="chapter-title">Time, Watermarks, and Progress</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/08-sources-sinks.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">8</span>&nbsp; <span class="chapter-title">Sources, Sinks, and Input Formatters</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-3" role="navigation" aria-expanded="true">
+ <span class="menu-text">Optimization and Compilation</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-3" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-3" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/09-rule-based-optimization.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">9</span>&nbsp; <span class="chapter-title">Rule-Based Logical Optimization</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/10-physical-lowering.html" class="sidebar-item-text sidebar-link active">
+ <span class="menu-text"><span class="chapter-number">10</span>&nbsp; <span class="chapter-title">Physical Lowering and Operator Choice</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/11-pipelining.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">11</span>&nbsp; <span class="chapter-title">Pipelining and Compiled Plans</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/12-nautilus-codegen.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">12</span>&nbsp; <span class="chapter-title">JIT Code Generation with Nautilus and MLIR</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/13-plugins.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">13</span>&nbsp; <span class="chapter-title">Plugin Registries and Extensibility</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-4" role="navigation" aria-expanded="true">
+ <span class="menu-text">Runtime and Execution</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-4" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-4" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/14-task-execution.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">14</span>&nbsp; <span class="chapter-title">Task-Based Execution Model</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/15-two-queue-scheduler.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">15</span>&nbsp; <span class="chapter-title">The Two-Queue Scheduler and Deadlock Avoidance</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/16-stateful-operators.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">16</span>&nbsp; <span class="chapter-title">Stateful Operators and State Management</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/17-error-handling.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">17</span>&nbsp; <span class="chapter-title">Error Handling, Logging, and Observability</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/18-frontends.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">18</span>&nbsp; <span class="chapter-title">The Worker Process and Client Frontends</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-5" role="navigation" aria-expanded="true">
+ <span class="menu-text">Operations and Frontiers</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-5" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-5" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/19-distributed-deployment.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">19</span>&nbsp; <span class="chapter-title">Distributed Deployment: Cloud, Fog, Edge</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/20-testing.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">20</span>&nbsp; <span class="chapter-title">Testing: Unit, Integration, and Systests</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/21-benchmarking.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">21</span>&nbsp; <span class="chapter-title">Benchmarking and Performance Engineering</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/22-open-problems.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">22</span>&nbsp; <span class="chapter-title">Where to Next: Open Problems</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../references.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">References</span></a>
+  </div>
+</li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-6" role="navigation" aria-expanded="true">
+ <span class="menu-text">Appendices</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-6" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-6" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/A-build.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Building NebulaStream</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/B-conventions.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Coding Conventions</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/C-glossary.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Glossary</span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+    </ul>
+    </div>
+</nav>
+<div id="quarto-sidebar-glass" class="quarto-sidebar-collapse-item" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item"></div>
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">Table of contents</h2>
+   
+  <ul>
+  <li><a href="#sec-physical-concept" id="toc-sec-physical-concept" class="nav-link active" data-scroll-target="#sec-physical-concept"><span class="header-section-number">10.1</span> 10.1 The physical operator concept</a></li>
+  <li><a href="#sec-physical-catalogue" id="toc-sec-physical-catalogue" class="nav-link" data-scroll-target="#sec-physical-catalogue"><span class="header-section-number">10.2</span> 10.2 The physical operator catalogue</a></li>
+  <li><a href="#sec-lowering-registry" id="toc-sec-lowering-registry" class="nav-link" data-scroll-target="#sec-lowering-registry"><span class="header-section-number">10.3</span> 10.3 The lowering rule registry</a></li>
+  <li><a href="#sec-hash-join-lower" id="toc-sec-hash-join-lower" class="nav-link" data-scroll-target="#sec-hash-join-lower"><span class="header-section-number">10.4</span> 10.4 The hash-join lowering, in detail</a></li>
+  <li><a href="#sec-aggregation" id="toc-sec-aggregation" class="nav-link" data-scroll-target="#sec-aggregation"><span class="header-section-number">10.5</span> 10.5 Aggregation: same structure, different state</a></li>
+  <li><a href="#sec-lower-non-goals" id="toc-sec-lower-non-goals" class="nav-link" data-scroll-target="#sec-lower-non-goals"><span class="header-section-number">10.6</span> 10.6 What is <em>not</em> in the lowering phase</a></li>
+  <li><a href="#sec-ch10-summary" id="toc-sec-ch10-summary" class="nav-link" data-scroll-target="#sec-ch10-summary"><span class="header-section-number">10.7</span> Summary</a></li>
+  <li><a href="#sec-ch10-exercises" id="toc-sec-ch10-exercises" class="nav-link" data-scroll-target="#sec-ch10-exercises"><span class="header-section-number">10.8</span> Reading exercises</a></li>
+  <li><a href="#sec-ch10-refs" id="toc-sec-ch10-refs" class="nav-link" data-scroll-target="#sec-ch10-refs"><span class="header-section-number">10.9</span> References</a></li>
+  </ul>
+<div class="toc-actions"><ul><li><a href="https://github.com/nebulastream/nebulastream-book/edit/main/chapters/10-physical-lowering.qmd" class="toc-action"><i class="bi bi-github"></i>Edit this page</a></li><li><a href="https://github.com/nebulastream/nebulastream-book/issues/new" class="toc-action"><i class="bi empty"></i>Report an issue</a></li></ul></div></nav>
+    </div>
+<!-- main -->
+<main class="content" id="quarto-document-content">
+
+
+<header id="title-block-header" class="quarto-title-block default"><nav class="quarto-page-breadcrumbs quarto-title-breadcrumbs d-none d-lg-block" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../chapters/09-rule-based-optimization.html">Optimization and Compilation</a></li><li class="breadcrumb-item"><a href="../chapters/10-physical-lowering.html"><span class="chapter-number">10</span>&nbsp; <span class="chapter-title">Physical Lowering and Operator Choice</span></a></li></ol></nav>
+<div class="quarto-title">
+<h1 class="title"><span id="sec-physical-lowering" class="quarto-section-identifier"><span class="chapter-number">10</span>&nbsp; <span class="chapter-title">Physical Lowering and Operator Choice</span></span></h1>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<div class="callout callout-style-default callout-note callout-empty-content callout-titled" title="Status: complete first draft">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Status: complete first draft
+</div>
+</div>
+<div class="callout-body-container callout-body">
+
+</div>
+</div>
+<p>A logical operator says <em>what</em> to compute. A physical operator says <em>how</em>. The distinction matters because there is usually more than one way: a join can be hash or nested-loop; an aggregation can be key-grouped or globally streamed; a memory layout can be row or columnar. Lowering is the engine’s commitment to a particular <em>how</em>.</p>
+<p>In NebulaStream, lowering is a phase in <code>nes-query-compiler/</code> called <code>LowerToPhysicalOperators</code>. It runs after optimisation and before pipelining. By the time it finishes, every logical operator has been replaced by an instance of a physical operator class that knows how to participate in code generation.</p>
+<hr>
+<section id="sec-physical-concept" class="level2" data-number="10.1">
+<h2 data-number="10.1" class="anchored" data-anchor-id="sec-physical-concept"><span class="header-section-number">10.1</span> 10.1 The physical operator concept</h2>
+<p>Physical operators, like logical operators, are defined through a C++20 concept rather than a class hierarchy. The concept lives in <code>nes-physical-operators/include/PhysicalOperator.hpp</code>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb1-1"><a href="#cb1-1"></a><span class="co">// nes-physical-operators/include/PhysicalOperator.hpp</span></span>
+<span id="cb1-2"><a href="#cb1-2"></a><span class="kw">template</span> <span class="op">&lt;</span><span class="kw">typename</span> T<span class="op">&gt;</span></span>
+<span id="cb1-3"><a href="#cb1-3"></a><span class="kw">concept</span> PhysicalOperatorConcept <span class="op">=</span> <span class="kw">requires</span><span class="op">(</span>T op<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb1-4"><a href="#cb1-4"></a>    <span class="op">{</span> op<span class="op">.</span>setup<span class="op">(...)</span> <span class="op">};</span></span>
+<span id="cb1-5"><a href="#cb1-5"></a>    <span class="op">{</span> op<span class="op">.</span>open<span class="op">(...)</span> <span class="op">};</span></span>
+<span id="cb1-6"><a href="#cb1-6"></a>    <span class="op">{</span> op<span class="op">.</span>execute<span class="op">(...)</span> <span class="op">};</span></span>
+<span id="cb1-7"><a href="#cb1-7"></a>    <span class="op">{</span> op<span class="op">.</span>close<span class="op">(...)</span> <span class="op">};</span></span>
+<span id="cb1-8"><a href="#cb1-8"></a><span class="op">};</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Four lifecycle methods, executed during code generation:</p>
+<ul>
+<li><strong><code>setup</code></strong> — called once at compile time. Allocates per-operator state, registers handlers.</li>
+<li><strong><code>open</code></strong> — called at the start of each pipeline invocation. Initialises per-invocation state.</li>
+<li><strong><code>execute</code></strong> — called once per <code>Record</code>. The hot path. Most of the actual work happens here.</li>
+<li><strong><code>close</code></strong> — called at the end of each pipeline invocation. Flushes anything pending.</li>
+</ul>
+<p>These look like a standard producer/consumer protocol because they are. NebulaStream’s physical operators are essentially Volcano- style operators with the per-tuple <code>next()</code> replaced by a per-batch <code>execute(Record)</code> and the whole protocol expressed at code- generation time rather than at runtime.</p>
+<hr>
+</section>
+<section id="sec-physical-catalogue" class="level2" data-number="10.2">
+<h2 data-number="10.2" class="anchored" data-anchor-id="sec-physical-catalogue"><span class="header-section-number">10.2</span> 10.2 The physical operator catalogue</h2>
+<p>The classes live in <code>nes-physical-operators/include/</code>. The major ones:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Logical operator</th>
+<th>Physical implementations</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Source</td>
+<td><code>SourcePhysicalOperator</code></td>
+</tr>
+<tr class="even">
+<td>Sink</td>
+<td><code>SinkPhysicalOperator</code></td>
+</tr>
+<tr class="odd">
+<td>Selection</td>
+<td><code>SelectionPhysicalOperator</code></td>
+</tr>
+<tr class="even">
+<td>Projection</td>
+<td><code>ProjectionPhysicalOperator</code></td>
+</tr>
+<tr class="odd">
+<td>Map</td>
+<td><code>MapPhysicalOperator</code></td>
+</tr>
+<tr class="even">
+<td>Join (hash)</td>
+<td><code>HJBuildPhysicalOperator</code> + <code>HJProbePhysicalOperator</code></td>
+</tr>
+<tr class="odd">
+<td>Join (nested-loop)</td>
+<td><code>NLJBuildPhysicalOperator</code> + <code>NLJProbePhysicalOperator</code></td>
+</tr>
+<tr class="even">
+<td>Aggregation</td>
+<td><code>AggregationBuildPhysicalOperator</code> + <code>AggregationProbePhysicalOperator</code></td>
+</tr>
+</tbody>
+</table>
+<p>A few observations.</p>
+<p>Stateful operators come in pairs — a <em>build</em> operator that accumulates state, and a <em>probe</em> operator that emits results. The two halves run on different sides of a pipeline boundary (Chapter 11) and communicate through a shared state structure registered during <code>setup</code>. This is the classical streaming-join pattern.</p>
+<p>Stateless operators are single classes. A <code>Selection</code> is just an <code>execute</code> that calls a predicate; if the predicate returns true, the record passes; if false, it is dropped.</p>
+<p>A <code>Map</code> is a pure transformation per field; the implementation is a thin wrapper that, at code-generation time, emits the field-by-field arithmetic.</p>
+<hr>
+</section>
+<section id="sec-lowering-registry" class="level2" data-number="10.3">
+<h2 data-number="10.3" class="anchored" data-anchor-id="sec-lowering-registry"><span class="header-section-number">10.3</span> 10.3 The lowering rule registry</h2>
+<p>Lowering itself is implemented as a <em>rule registry</em>. Each logical operator type has a corresponding lowering rule registered in <code>LoweringRuleRegistry</code>. The rule’s job is to take a logical operator plus context and return a physical operator (or, for stateful operators, a pair).</p>
+<p>The dispatch is in <code>LowerToPhysicalOperators.cpp</code>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb2-1"><a href="#cb2-1"></a><span class="co">// nes-query-compiler/src/Phases/LowerToPhysicalOperators.cpp</span></span>
+<span id="cb2-2"><a href="#cb2-2"></a><span class="bu">std::</span>unique_ptr<span class="op">&lt;</span>AbstractLoweringRule<span class="op">&gt;</span></span>
+<span id="cb2-3"><a href="#cb2-3"></a>resolveLoweringRule<span class="op">(</span><span class="at">const</span> LogicalOperator<span class="op">&amp;</span> logicalOperator<span class="op">,</span></span>
+<span id="cb2-4"><a href="#cb2-4"></a>                    <span class="at">const</span> LoweringRuleRegistryArguments<span class="op">&amp;</span> registryArgument<span class="op">)</span></span>
+<span id="cb2-5"><a href="#cb2-5"></a><span class="op">{</span></span>
+<span id="cb2-6"><a href="#cb2-6"></a>    <span class="cf">if</span> <span class="op">(</span>logicalOperatorName <span class="op">==</span> <span class="st">"Join"</span><span class="op">)</span></span>
+<span id="cb2-7"><a href="#cb2-7"></a>    <span class="op">{</span></span>
+<span id="cb2-8"><a href="#cb2-8"></a>        <span class="at">const</span> <span class="kw">auto</span> implementationTraitOpt</span>
+<span id="cb2-9"><a href="#cb2-9"></a>            <span class="op">=</span> getTrait<span class="op">&lt;</span>JoinImplementationTypeTrait<span class="op">&gt;(</span>traitSet<span class="op">);</span></span>
+<span id="cb2-10"><a href="#cb2-10"></a>        <span class="cf">switch</span> <span class="op">(</span>implementationTrait<span class="op">-&gt;</span>implementationType<span class="op">)</span></span>
+<span id="cb2-11"><a href="#cb2-11"></a>        <span class="op">{</span></span>
+<span id="cb2-12"><a href="#cb2-12"></a>            <span class="cf">case</span> JoinImplementation<span class="op">::</span>HASH_JOIN<span class="op">:</span></span>
+<span id="cb2-13"><a href="#cb2-13"></a>                <span class="cf">return</span> LoweringRuleRegistry<span class="op">::</span>instance<span class="op">()</span></span>
+<span id="cb2-14"><a href="#cb2-14"></a>                           <span class="op">.</span>create<span class="op">(</span><span class="st">"HashJoin"</span><span class="op">,</span> registryArgument<span class="op">);</span></span>
+<span id="cb2-15"><a href="#cb2-15"></a>            <span class="cf">case</span> JoinImplementation<span class="op">::</span>NESTED_LOOP_JOIN<span class="op">:</span></span>
+<span id="cb2-16"><a href="#cb2-16"></a>                <span class="cf">return</span> LoweringRuleRegistry<span class="op">::</span>instance<span class="op">()</span></span>
+<span id="cb2-17"><a href="#cb2-17"></a>                           <span class="op">.</span>create<span class="op">(</span><span class="st">"NLJoin"</span><span class="op">,</span> registryArgument<span class="op">);</span></span>
+<span id="cb2-18"><a href="#cb2-18"></a>        <span class="op">}</span></span>
+<span id="cb2-19"><a href="#cb2-19"></a>    <span class="op">}</span></span>
+<span id="cb2-20"><a href="#cb2-20"></a>    <span class="co">// ... generic case for other operators</span></span>
+<span id="cb2-21"><a href="#cb2-21"></a><span class="op">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>For a join, the dispatch reads the <code>JoinImplementationTypeTrait</code> attached by <code>DecideJoinTypesRule</code> (Chapter 9) and selects the appropriate physical operator factory by name. For other operators the dispatch is a single-name lookup.</p>
+<p>The registry is the same plugin pattern we will see in detail in Chapter 13. Its presence here means a third party can add a new join implementation — say, an interval-join algorithm — by registering a lowering rule named “IntervalJoin” and updating the optimiser’s join-type decision to choose it. The framework is not locked.</p>
+<hr>
+</section>
+<section id="sec-hash-join-lower" class="level2" data-number="10.4">
+<h2 data-number="10.4" class="anchored" data-anchor-id="sec-hash-join-lower"><span class="header-section-number">10.4</span> 10.4 The hash-join lowering, in detail</h2>
+<p>A <code>JoinLogicalOperator</code> whose trait says <code>HASH_JOIN</code> lowers into <em>two</em> physical operators:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb3-1"><a href="#cb3-1"></a><span class="co">// nes-physical-operators/include/Join/HashJoin/HJBuildPhysicalOperator.hpp</span></span>
+<span id="cb3-2"><a href="#cb3-2"></a><span class="kw">class</span> HJBuildPhysicalOperator <span class="op">:</span> <span class="kw">public</span> StreamJoinBuildPhysicalOperator <span class="op">{</span></span>
+<span id="cb3-3"><a href="#cb3-3"></a><span class="kw">public</span><span class="op">:</span></span>
+<span id="cb3-4"><a href="#cb3-4"></a>    HJBuildPhysicalOperator<span class="op">(</span></span>
+<span id="cb3-5"><a href="#cb3-5"></a>        OperatorHandlerId operatorHandlerId<span class="op">,</span></span>
+<span id="cb3-6"><a href="#cb3-6"></a>        JoinBuildSideType joinBuildSide<span class="op">,</span></span>
+<span id="cb3-7"><a href="#cb3-7"></a>        <span class="bu">std::</span>unique_ptr<span class="op">&lt;</span>TimeFunction<span class="op">&gt;</span> timeFunction<span class="op">,</span></span>
+<span id="cb3-8"><a href="#cb3-8"></a>        <span class="at">const</span> <span class="bu">std::</span>shared_ptr<span class="op">&lt;</span>TupleBufferRef<span class="op">&gt;&amp;</span> bufferRef<span class="op">,</span></span>
+<span id="cb3-9"><a href="#cb3-9"></a>        HashMapOptions hashMapOptions<span class="op">);</span></span>
+<span id="cb3-10"><a href="#cb3-10"></a>    <span class="dt">void</span> setup<span class="op">(</span>ExecutionContext<span class="op">&amp;</span> executionCtx<span class="op">,</span></span>
+<span id="cb3-11"><a href="#cb3-11"></a>               CompilationContext<span class="op">&amp;</span> compilationContext<span class="op">)</span> <span class="at">const</span> <span class="kw">override</span><span class="op">;</span></span>
+<span id="cb3-12"><a href="#cb3-12"></a>    <span class="dt">void</span> execute<span class="op">(</span>ExecutionContext<span class="op">&amp;</span> ctx<span class="op">,</span> Record<span class="op">&amp;</span> record<span class="op">)</span> <span class="at">const</span> <span class="kw">override</span><span class="op">;</span></span>
+<span id="cb3-13"><a href="#cb3-13"></a><span class="op">};</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>The build operator accepts records from one side of the join and inserts them into a hash map keyed on the join key. The probe operator accepts records from the other side and looks them up, emitting joined records on each match.</p>
+<p>The hash map itself is one of the runtime data structures from <code>nes-nautilus/</code>, a JIT-aware container we will examine in Chapter 12. For now, note that the build’s <code>setup</code> method registers a handler that owns the hash map; both build and probe share access to it through an <code>OperatorHandlerId</code>.</p>
+<p>The pair-of-operators pattern is also how the build/probe split introduces a <em>pipeline boundary</em>: the build is on one pipeline, the probe on another, with the hash map mediating between them. That is the Chapter 11 story.</p>
+<hr>
+</section>
+<section id="sec-aggregation" class="level2" data-number="10.5">
+<h2 data-number="10.5" class="anchored" data-anchor-id="sec-aggregation"><span class="header-section-number">10.5</span> 10.5 Aggregation: same structure, different state</h2>
+<p>Aggregations also lower into a build/probe pair. The build inserts records into a hash map keyed on the grouping key (or, for global aggregations, into a single accumulator). The probe walks the hash map after each window fires and emits one record per group.</p>
+<p>The interesting difference from joins is that the aggregation’s hash map values are <em>partial aggregates</em>, not records. For <code>AVG(speed)</code>, the value is <code>(sum, count)</code>; for <code>MAX(value)</code> it is the running maximum. The aggregation function knows how to combine a partial aggregate with an incoming value (the <code>combine</code> step) and how to convert a partial aggregate into a result tuple (the <code>extract</code> step).</p>
+<p>The actual aggregation classes are in <code>nes-physical-operators/include/Aggregation/</code>. The aggregation function vocabulary is in <code>nes-logical-operators/include/Operators/Windows/Aggregations/</code> — SUM, COUNT, MIN, MAX, AVG, plus a generic UDF aggregation slot.</p>
+<hr>
+</section>
+<section id="sec-lower-non-goals" class="level2" data-number="10.6">
+<h2 data-number="10.6" class="anchored" data-anchor-id="sec-lower-non-goals"><span class="header-section-number">10.6</span> 10.6 What is <em>not</em> in the lowering phase</h2>
+<p>Several decisions feel like they ought to belong here but do not.</p>
+<p><strong>Code generation</strong> belongs to the next two phases (pipelining, then JIT). The lowering phase produces physical operator <em>objects</em>; it does not generate any code. The objects expose methods that the JIT calls.</p>
+<p><strong>Memory allocation</strong> belongs to setup-time bookkeeping in the runtime, driven by physical operators but not allocated by the lowering rules. The lowering rule says “this build operator will need a hash map of size approximately N”; the runtime allocates when the query starts.</p>
+<p><strong>Parallelism decisions</strong> also do not happen here. Whether to parallelise the join across multiple worker threads is decided at runtime by the task scheduler (Chapter 15), not at lowering time.</p>
+<p>The lowering phase’s scope is narrow: pick a class, instantiate it with the right configuration, hand it to the next phase.</p>
+<hr>
+</section>
+<section id="sec-ch10-summary" class="level2" data-number="10.7">
+<h2 data-number="10.7" class="anchored" data-anchor-id="sec-ch10-summary"><span class="header-section-number">10.7</span> Summary</h2>
+<p>The lowering phase rewrites a logical plan into a physical plan by replacing each logical operator with one or more physical operators. The dispatch is through a <code>LoweringRuleRegistry</code>, selecting an implementation by name and (for joins) by trait. Stateful operators (joins, aggregations) lower into a build/probe pair that share state through an <code>OperatorHandlerId</code>. Stateless operators lower one-to-one. The phase is small (about a dozen rules) and largely mechanical; the interesting decisions — physical join type, memory layout — were already made by the optimiser.</p>
+<hr>
+</section>
+<section id="sec-ch10-exercises" class="level2" data-number="10.8">
+<h2 data-number="10.8" class="anchored" data-anchor-id="sec-ch10-exercises"><span class="header-section-number">10.8</span> Reading exercises</h2>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 10.1: read a hash-join lowering">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 10.1: read a hash-join lowering
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Set a breakpoint at the entry of the hash-join lowering rule. Submit a hash-join query (any <code>JoinMultipleStreams.test</code> will do). Inspect the lowered plan: confirm two physical operators (<code>HJBuildPhysicalOperator</code>, <code>HJProbePhysicalOperator</code>) replaced the single <code>JoinLogicalOperator</code>. What <code>OperatorHandlerId</code> was chosen? How does it tie the two halves together?</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 10.2: nested-loop fallback">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 10.2: nested-loop fallback
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>From Chapter 9’s exercise, you have a query with an inequality join. Confirm that lowering produces <code>NLJBuildPhysicalOperator</code> and <code>NLJProbePhysicalOperator</code>. Compare the runtime against the hash-join case.</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 10.3: implementation registration">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 10.3: implementation registration
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Locate the line(s) that register the HashJoin and NLJoin lowering rules in the registry. Compare to the registration pattern for the source plugins (Chapter 8). Are they the same mechanism? They should be — both use <code>LoweringRuleRegistry</code> / <code>SourceRegistry</code> on top of the static-plugin-registry framework.</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-ch10-refs" class="level2" data-number="10.9">
+<h2 data-number="10.9" class="anchored" data-anchor-id="sec-ch10-refs"><span class="header-section-number">10.9</span> References</h2>
+<ul>
+<li><em>PhysicalOperator concept.</em> <code>nes-physical-operators/include/PhysicalOperator.hpp</code>.</li>
+<li><em>HJBuildPhysicalOperator.</em> <code>nes-physical-operators/include/Join/HashJoin/HJBuildPhysicalOperator.hpp</code>.</li>
+<li><em>Lowering registry.</em> <code>nes-query-compiler/private/Phases/LowerToPhysicalOperators.hpp</code>.</li>
+<li><em>Volcano operator model.</em> G. Graefe. <em>Volcano — An Extensible and Parallel Query Evaluation System.</em> IEEE TKDE, 1994.</li>
+<li><em>Hash join in streaming.</em> J. Krämer, B. Seeger. <em>Semantics and Implementation of Continuous Sliding Window Queries Over Data Streams.</em> ACM TODS, 2009.</li>
+</ul>
+
+
+</section>
+
+</main> <!-- /main -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    // Ensure there is a toggle, if there isn't float one in the top right
+    if (window.document.querySelector('.quarto-color-scheme-toggle') === null) {
+      const a = window.document.createElement('a');
+      a.classList.add('top-right');
+      a.classList.add('quarto-color-scheme-toggle');
+      a.href = "";
+      a.onclick = function() { try { window.quartoToggleColorScheme(); } catch {} return false; };
+      const i = window.document.createElement("i");
+      i.classList.add('bi');
+      a.appendChild(i);
+      window.document.body.appendChild(a);
+    }
+    setColorSchemeToggle(hasAlternateSentinel())
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/nebula\.stream");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+            // target, if specified
+            link.setAttribute("target", "_blank");
+            if (link.getAttribute("rel") === null) {
+              link.setAttribute("rel", "noopener");
+            }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+<nav class="page-navigation">
+  <div class="nav-page nav-page-previous">
+      <a href="../chapters/09-rule-based-optimization.html" class="pagination-link" aria-label="Rule-Based Logical Optimization">
+        <i class="bi bi-arrow-left-short"></i> <span class="nav-page-text"><span class="chapter-number">9</span>&nbsp; <span class="chapter-title">Rule-Based Logical Optimization</span></span>
+      </a>          
+  </div>
+  <div class="nav-page nav-page-next">
+      <a href="../chapters/11-pipelining.html" class="pagination-link" aria-label="Pipelining and Compiled Plans">
+        <span class="nav-page-text"><span class="chapter-number">11</span>&nbsp; <span class="chapter-title">Pipelining and Compiled Plans</span></span> <i class="bi bi-arrow-right-short"></i>
+      </a>
+  </div>
+</nav>
+</div> <!-- /content -->
+<footer class="footer">
+  <div class="nav-footer">
+    <div class="nav-footer-left">
+<p>© CC BY-SA — code excerpts under Apache-2.0 from NebulaStream</p>
+</div>   
+    <div class="nav-footer-center">
+<p><a href="https://nebula.stream">nebula.stream</a> · <a href="https://github.com/nebulastream/nebulastream">github</a></p>
+<div class="toc-actions d-sm-block d-md-none"><ul><li><a href="https://github.com/nebulastream/nebulastream-book/edit/main/chapters/10-physical-lowering.qmd" class="toc-action"><i class="bi bi-github"></i>Edit this page</a></li><li><a href="https://github.com/nebulastream/nebulastream-book/issues/new" class="toc-action"><i class="bi empty"></i>Report an issue</a></li></ul></div></div>
+    <div class="nav-footer-right">
+<p>Built with <a href="https://quarto.org">Quarto</a></p>
+</div>
+  </div>
+</footer>
+
+
+
+
+<script src="../site_libs/quarto-html/zenscroll-min.js"></script>
+</body></html>

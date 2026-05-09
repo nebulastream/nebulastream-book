@@ -1,0 +1,1295 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.9.37">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>16&nbsp; Stateful Operators and State Management – NebulaStream: A Stream Processing Engine from the Inside Out</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="../site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="../site_libs/quarto-nav/headroom.min.js"></script>
+<script src="../site_libs/clipboard/clipboard.min.js"></script>
+<script src="../site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="../site_libs/quarto-search/fuse.min.js"></script>
+<script src="../site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="../">
+<link href="../chapters/17-error-handling.html" rel="next">
+<link href="../chapters/15-two-queue-scheduler.html" rel="prev">
+<link href="../figures/favicon.ico" rel="icon">
+<script src="../site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="../site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="../site_libs/quarto-html/popper.min.js"></script>
+<script src="../site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="../site_libs/quarto-html/anchor.min.js"></script>
+<link href="../site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-f5b116b226ab7871a339bcb27e385d4f.css" rel="stylesheet" class="quarto-color-scheme" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-dark-fa7fa037caeb5c295dcabee9de8bbbbc.css" rel="stylesheet" class="quarto-color-scheme quarto-color-alternate" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-f5b116b226ab7871a339bcb27e385d4f.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
+<script src="../site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="../site_libs/bootstrap/bootstrap-59cd90b3a31d59781837685af5616a03.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-7555ce834b751ef39c6101133797c128.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-59cd90b3a31d59781837685af5616a03.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "location": "sidebar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "start",
+  "type": "textbox",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+<style>html{ scroll-behavior: smooth; }</style>
+
+
+</head>
+
+<body class="nav-sidebar docked quarto-light"><script id="quarto-html-before-body" type="application/javascript">
+    const toggleBodyColorMode = (bsSheetEl) => {
+      const mode = bsSheetEl.getAttribute("data-mode");
+      const bodyEl = window.document.querySelector("body");
+      if (mode === "dark") {
+        bodyEl.classList.add("quarto-dark");
+        bodyEl.classList.remove("quarto-light");
+      } else {
+        bodyEl.classList.add("quarto-light");
+        bodyEl.classList.remove("quarto-dark");
+      }
+    }
+    const toggleBodyColorPrimary = () => {
+      const bsSheetEl = window.document.querySelector("link#quarto-bootstrap:not([rel=disabled-stylesheet])");
+      if (bsSheetEl) {
+        toggleBodyColorMode(bsSheetEl);
+      }
+    }
+    const setColorSchemeToggle = (alternate) => {
+      const toggles = window.document.querySelectorAll('.quarto-color-scheme-toggle');
+      for (let i=0; i < toggles.length; i++) {
+        const toggle = toggles[i];
+        if (toggle) {
+          if (alternate) {
+            toggle.classList.add("alternate");
+          } else {
+            toggle.classList.remove("alternate");
+          }
+        }
+      }
+    };
+    const toggleColorMode = (alternate) => {
+      // Switch the stylesheets
+      const primaryStylesheets = window.document.querySelectorAll('link.quarto-color-scheme:not(.quarto-color-alternate)');
+      const alternateStylesheets = window.document.querySelectorAll('link.quarto-color-scheme.quarto-color-alternate');
+      manageTransitions('#quarto-margin-sidebar .nav-link', false);
+      if (alternate) {
+        // note: dark is layered on light, we don't disable primary!
+        enableStylesheet(alternateStylesheets);
+        for (const sheetNode of alternateStylesheets) {
+          if (sheetNode.id === "quarto-bootstrap") {
+            toggleBodyColorMode(sheetNode);
+          }
+        }
+      } else {
+        disableStylesheet(alternateStylesheets);
+        enableStylesheet(primaryStylesheets)
+        toggleBodyColorPrimary();
+      }
+      manageTransitions('#quarto-margin-sidebar .nav-link', true);
+      // Switch the toggles
+      setColorSchemeToggle(alternate)
+      // Hack to workaround the fact that safari doesn't
+      // properly recolor the scrollbar when toggling (#1455)
+      if (navigator.userAgent.indexOf('Safari') > 0 && navigator.userAgent.indexOf('Chrome') == -1) {
+        manageTransitions("body", false);
+        window.scrollTo(0, 1);
+        setTimeout(() => {
+          window.scrollTo(0, 0);
+          manageTransitions("body", true);
+        }, 40);
+      }
+    }
+    const disableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        stylesheet.rel = 'disabled-stylesheet';
+      }
+    }
+    const enableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        if(stylesheet.rel !== 'stylesheet') { // for Chrome, which will still FOUC without this check
+          stylesheet.rel = 'stylesheet';
+        }
+      }
+    }
+    const manageTransitions = (selector, allowTransitions) => {
+      const els = window.document.querySelectorAll(selector);
+      for (let i=0; i < els.length; i++) {
+        const el = els[i];
+        if (allowTransitions) {
+          el.classList.remove('notransition');
+        } else {
+          el.classList.add('notransition');
+        }
+      }
+    }
+    const isFileUrl = () => {
+      return window.location.protocol === 'file:';
+    }
+    const hasAlternateSentinel = () => {
+      let styleSentinel = getColorSchemeSentinel();
+      if (styleSentinel !== null) {
+        return styleSentinel === "alternate";
+      } else {
+        return false;
+      }
+    }
+    const setStyleSentinel = (alternate) => {
+      const value = alternate ? "alternate" : "default";
+      if (!isFileUrl()) {
+        window.localStorage.setItem("quarto-color-scheme", value);
+      } else {
+        localAlternateSentinel = value;
+      }
+    }
+    const getColorSchemeSentinel = () => {
+      if (!isFileUrl()) {
+        const storageValue = window.localStorage.getItem("quarto-color-scheme");
+        return storageValue != null ? storageValue : localAlternateSentinel;
+      } else {
+        return localAlternateSentinel;
+      }
+    }
+    const toggleGiscusIfUsed = (isAlternate, darkModeDefault) => {
+      const baseTheme = document.querySelector('#giscus-base-theme')?.value ?? 'light';
+      const alternateTheme = document.querySelector('#giscus-alt-theme')?.value ?? 'dark';
+      let newTheme = '';
+      if(authorPrefersDark) {
+        newTheme = isAlternate ? baseTheme : alternateTheme;
+      } else {
+        newTheme = isAlternate ? alternateTheme : baseTheme;
+      }
+      const changeGiscusTheme = () => {
+        // From: https://github.com/giscus/giscus/issues/336
+        const sendMessage = (message) => {
+          const iframe = document.querySelector('iframe.giscus-frame');
+          if (!iframe) return;
+          iframe.contentWindow.postMessage({ giscus: message }, 'https://giscus.app');
+        }
+        sendMessage({
+          setConfig: {
+            theme: newTheme
+          }
+        });
+      }
+      const isGiscussLoaded = window.document.querySelector('iframe.giscus-frame') !== null;
+      if (isGiscussLoaded) {
+        changeGiscusTheme();
+      }
+    };
+    const authorPrefersDark = false;
+    const darkModeDefault = authorPrefersDark;
+      document.querySelector('link#quarto-text-highlighting-styles.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+      document.querySelector('link#quarto-bootstrap.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+    let localAlternateSentinel = darkModeDefault ? 'alternate' : 'default';
+    // Dark / light mode switch
+    window.quartoToggleColorScheme = () => {
+      // Read the current dark / light value
+      let toAlternate = !hasAlternateSentinel();
+      toggleColorMode(toAlternate);
+      setStyleSentinel(toAlternate);
+      toggleGiscusIfUsed(toAlternate, darkModeDefault);
+      window.dispatchEvent(new Event('resize'));
+    };
+    // Switch to dark mode if need be
+    if (hasAlternateSentinel()) {
+      toggleColorMode(true);
+    } else {
+      toggleColorMode(false);
+    }
+  </script>
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top">
+  <nav class="quarto-secondary-nav">
+    <div class="container-fluid d-flex">
+      <button type="button" class="quarto-btn-toggle btn" data-bs-toggle="collapse" role="button" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+        <i class="bi bi-layout-text-sidebar-reverse"></i>
+      </button>
+        <nav class="quarto-page-breadcrumbs" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../chapters/14-task-execution.html">Runtime and Execution</a></li><li class="breadcrumb-item"><a href="../chapters/16-stateful-operators.html"><span class="chapter-number">16</span>&nbsp; <span class="chapter-title">Stateful Operators and State Management</span></a></li></ol></nav>
+        <a class="flex-grow-1" role="navigation" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">      
+        </a>
+      <button type="button" class="btn quarto-search-button" aria-label="Search" onclick="window.quartoOpenSearch();">
+        <i class="bi bi-search"></i>
+      </button>
+    </div>
+  </nav>
+</header>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article">
+<!-- sidebar -->
+  <nav id="quarto-sidebar" class="sidebar collapse collapse-horizontal quarto-sidebar-collapse-item sidebar-navigation docked overflow-auto">
+    <div class="pt-lg-2 mt-2 text-left sidebar-header sidebar-header-stacked">
+      <a href="../index.html" class="sidebar-logo-link">
+      <img src="../figures/neslogo.png" alt="" class="sidebar-logo light-content py-0 d-lg-inline d-none">
+      <img src="../figures/neslogo.png" alt="" class="sidebar-logo dark-content py-0 d-lg-inline d-none">
+      </a>
+    <div class="sidebar-title mb-0 py-0">
+      <a href="../">NebulaStream Internals</a> 
+        <div class="sidebar-tools-main tools-wide">
+    <a href="https://github.com/nebulastream/nebulastream-book" title="Source Code" class="quarto-navigation-tool px-1" aria-label="Source Code"><i class="bi bi-github"></i></a>
+  <a href="" class="quarto-color-scheme-toggle quarto-navigation-tool  px-1" onclick="window.quartoToggleColorScheme(); return false;" title="Toggle dark mode"><i class="bi"></i></a>
+  <a href="" class="quarto-reader-toggle quarto-navigation-tool px-1" onclick="window.quartoToggleReader(); return false;" title="Toggle reader mode">
+  <div class="quarto-reader-toggle-btn">
+  <i class="bi"></i>
+  </div>
+</a>
+</div>
+    </div>
+      </div>
+        <div class="mt-2 flex-shrink-0 align-items-center">
+        <div class="sidebar-search">
+        <div id="quarto-search" class="" title="Search"></div>
+        </div>
+        </div>
+    <div class="sidebar-menu-container"> 
+    <ul class="list-unstyled mt-1">
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../index.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Preface</span></a>
+  </div>
+</li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-1" role="navigation" aria-expanded="true">
+ <span class="menu-text">Foundations</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-1" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-1" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/01-why-streaming.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">1</span>&nbsp; <span class="chapter-title">Why Stream Processing? Why Another Engine?</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/02-system-tour.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">2</span>&nbsp; <span class="chapter-title">System Tour: From SQL to Native Code</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/03-data-model.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">3</span>&nbsp; <span class="chapter-title">Data Model and Type System</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/04-buffer-management.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">4</span>&nbsp; <span class="chapter-title">Buffer Management and Memory Layout</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-2" role="navigation" aria-expanded="true">
+ <span class="menu-text">The Query Frontier</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-2" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-2" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/05-query-language.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">5</span>&nbsp; <span class="chapter-title">The Query Language and Parser</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/06-logical-algebra.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">6</span>&nbsp; <span class="chapter-title">Logical Operator Algebra</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/07-watermarks.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">7</span>&nbsp; <span class="chapter-title">Time, Watermarks, and Progress</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/08-sources-sinks.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">8</span>&nbsp; <span class="chapter-title">Sources, Sinks, and Input Formatters</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-3" role="navigation" aria-expanded="true">
+ <span class="menu-text">Optimization and Compilation</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-3" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-3" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/09-rule-based-optimization.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">9</span>&nbsp; <span class="chapter-title">Rule-Based Logical Optimization</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/10-physical-lowering.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">10</span>&nbsp; <span class="chapter-title">Physical Lowering and Operator Choice</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/11-pipelining.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">11</span>&nbsp; <span class="chapter-title">Pipelining and Compiled Plans</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/12-nautilus-codegen.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">12</span>&nbsp; <span class="chapter-title">JIT Code Generation with Nautilus and MLIR</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/13-plugins.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">13</span>&nbsp; <span class="chapter-title">Plugin Registries and Extensibility</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-4" role="navigation" aria-expanded="true">
+ <span class="menu-text">Runtime and Execution</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-4" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-4" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/14-task-execution.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">14</span>&nbsp; <span class="chapter-title">Task-Based Execution Model</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/15-two-queue-scheduler.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">15</span>&nbsp; <span class="chapter-title">The Two-Queue Scheduler and Deadlock Avoidance</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/16-stateful-operators.html" class="sidebar-item-text sidebar-link active">
+ <span class="menu-text"><span class="chapter-number">16</span>&nbsp; <span class="chapter-title">Stateful Operators and State Management</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/17-error-handling.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">17</span>&nbsp; <span class="chapter-title">Error Handling, Logging, and Observability</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/18-frontends.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">18</span>&nbsp; <span class="chapter-title">The Worker Process and Client Frontends</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-5" role="navigation" aria-expanded="true">
+ <span class="menu-text">Operations and Frontiers</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-5" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-5" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/19-distributed-deployment.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">19</span>&nbsp; <span class="chapter-title">Distributed Deployment: Cloud, Fog, Edge</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/20-testing.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">20</span>&nbsp; <span class="chapter-title">Testing: Unit, Integration, and Systests</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/21-benchmarking.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">21</span>&nbsp; <span class="chapter-title">Benchmarking and Performance Engineering</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/22-open-problems.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">22</span>&nbsp; <span class="chapter-title">Where to Next: Open Problems</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../references.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">References</span></a>
+  </div>
+</li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-6" role="navigation" aria-expanded="true">
+ <span class="menu-text">Appendices</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-6" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-6" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/A-build.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Building NebulaStream</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/B-conventions.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Coding Conventions</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/C-glossary.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Glossary</span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+    </ul>
+    </div>
+</nav>
+<div id="quarto-sidebar-glass" class="quarto-sidebar-collapse-item" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item"></div>
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">Table of contents</h2>
+   
+  <ul>
+  <li><a href="#sec-state-arch" id="toc-sec-state-arch" class="nav-link active" data-scroll-target="#sec-state-arch"><span class="header-section-number">16.1</span> 16.1 The state architecture: handlers, hash maps, and PagedVectors</a></li>
+  <li><a href="#sec-hash-join-state" id="toc-sec-hash-join-state" class="nav-link" data-scroll-target="#sec-hash-join-state"><span class="header-section-number">16.2</span> 16.2 The hash join’s state</a></li>
+  <li><a href="#sec-aggregation-state" id="toc-sec-aggregation-state" class="nav-link" data-scroll-target="#sec-aggregation-state"><span class="header-section-number">16.3</span> 16.3 Aggregation state</a></li>
+  <li><a href="#sec-slices" id="toc-sec-slices" class="nav-link" data-scroll-target="#sec-slices"><span class="header-section-number">16.4</span> 16.4 The slice abstraction</a></li>
+  <li><a href="#sec-concurrent-state" id="toc-sec-concurrent-state" class="nav-link" data-scroll-target="#sec-concurrent-state"><span class="header-section-number">16.5</span> 16.5 Concurrent state, safely</a></li>
+  <li><a href="#sec-gc" id="toc-sec-gc" class="nav-link" data-scroll-target="#sec-gc"><span class="header-section-number">16.6</span> 16.6 Garbage collection</a></li>
+  <li><a href="#sec-ch16-summary" id="toc-sec-ch16-summary" class="nav-link" data-scroll-target="#sec-ch16-summary"><span class="header-section-number">16.7</span> Summary</a></li>
+  <li><a href="#sec-ch16-exercises" id="toc-sec-ch16-exercises" class="nav-link" data-scroll-target="#sec-ch16-exercises"><span class="header-section-number">16.8</span> Reading exercises</a></li>
+  <li><a href="#sec-ch16-refs" id="toc-sec-ch16-refs" class="nav-link" data-scroll-target="#sec-ch16-refs"><span class="header-section-number">16.9</span> References</a></li>
+  </ul>
+<div class="toc-actions"><ul><li><a href="https://github.com/nebulastream/nebulastream-book/edit/main/chapters/16-stateful-operators.qmd" class="toc-action"><i class="bi bi-github"></i>Edit this page</a></li><li><a href="https://github.com/nebulastream/nebulastream-book/issues/new" class="toc-action"><i class="bi empty"></i>Report an issue</a></li></ul></div></nav>
+    </div>
+<!-- main -->
+<main class="content" id="quarto-document-content">
+
+
+<header id="title-block-header" class="quarto-title-block default"><nav class="quarto-page-breadcrumbs quarto-title-breadcrumbs d-none d-lg-block" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../chapters/14-task-execution.html">Runtime and Execution</a></li><li class="breadcrumb-item"><a href="../chapters/16-stateful-operators.html"><span class="chapter-number">16</span>&nbsp; <span class="chapter-title">Stateful Operators and State Management</span></a></li></ol></nav>
+<div class="quarto-title">
+<h1 class="title"><span id="sec-stateful-operators" class="quarto-section-identifier"><span class="chapter-number">16</span>&nbsp; <span class="chapter-title">Stateful Operators and State Management</span></span></h1>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<div class="callout callout-style-default callout-note callout-empty-content callout-titled" title="Status: complete first draft">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Status: complete first draft
+</div>
+</div>
+<div class="callout-body-container callout-body">
+
+</div>
+</div>
+<p>Stateless operators have it easy. A <code>Selection</code>, a <code>Map</code>, a <code>Projection</code> — each takes a record, transforms it, forwards it. Nothing remembered, nothing to clean up, nothing that can grow unbounded.</p>
+<p>Stateful operators are where streaming gets interesting. A hash join build accumulates one side of the join. A windowed aggregation accumulates partial sums per group per window. A session window operator accumulates per-session bookkeeping until the session times out. State is the engine’s memory of what has happened, and it has to be kept correct, kept bounded, and kept usable across worker threads.</p>
+<p>This chapter walks through how NebulaStream manages stateful operator state. The data structures are the runtime ones we met in Chapter 12 (<code>HashMap</code>, <code>PagedVector</code>); the lifecycle is intricate enough to warrant its own chapter.</p>
+<hr>
+<section id="sec-state-arch" class="level2" data-number="16.1">
+<h2 data-number="16.1" class="anchored" data-anchor-id="sec-state-arch"><span class="header-section-number">16.1</span> 16.1 The state architecture: handlers, hash maps, and PagedVectors</h2>
+<p>Every stateful operator in NebulaStream owns its state through an <em>operator handler</em>. The handler is a runtime object — distinct from the operator class itself — that holds the per-query state and exposes it to both the build and probe halves of the operator pair.</p>
+<p>Handlers are registered at query-startup time, identified by an <code>OperatorHandlerId</code>, and torn down when the pipeline that owns them is destroyed. The <code>OperatorHandlerId</code> is the join’s “shared key” — the build operator references it to know where to insert; the probe operator references the same one to know where to look up.</p>
+<p>The state itself almost always combines two structures:</p>
+<ul>
+<li><strong>A <code>HashMap</code></strong> keyed on the join key (or the grouping key). The hash map holds entries, each a fixed-size header plus a pointer to a value chain.</li>
+<li><strong>A <code>PagedVector</code></strong> of values for chained collisions or unbounded per-key history.</li>
+</ul>
+<p>Both come from <code>nes-nautilus/</code>; both are designed for the JIT to inline.</p>
+<hr>
+</section>
+<section id="sec-hash-join-state" class="level2" data-number="16.2">
+<h2 data-number="16.2" class="anchored" data-anchor-id="sec-hash-join-state"><span class="header-section-number">16.2</span> 16.2 The hash join’s state</h2>
+<p>For a hash join, the build operator inserts each input tuple into the hash map keyed on the join key. Hash collisions chain at the bucket head. The probe operator looks up incoming tuples by hash and walks the chain emitting matches.</p>
+<p>The interface is small:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb1-1"><a href="#cb1-1"></a><span class="co">// nes-nautilus/include/Nautilus/Interface/HashMap/HashMap.hpp</span></span>
+<span id="cb1-2"><a href="#cb1-2"></a><span class="kw">class</span> HashMap <span class="op">{</span></span>
+<span id="cb1-3"><a href="#cb1-3"></a><span class="kw">public</span><span class="op">:</span></span>
+<span id="cb1-4"><a href="#cb1-4"></a>    <span class="kw">virtual</span> <span class="op">~</span>HashMap<span class="op">()</span> <span class="op">=</span> <span class="cf">default</span><span class="op">;</span></span>
+<span id="cb1-5"><a href="#cb1-5"></a>    <span class="kw">virtual</span> AbstractHashMapEntry<span class="op">*</span> insertEntry<span class="op">(</span></span>
+<span id="cb1-6"><a href="#cb1-6"></a>        HashFunction<span class="op">::</span>HashValue<span class="op">::</span><span class="dt">raw_type</span> hash<span class="op">,</span></span>
+<span id="cb1-7"><a href="#cb1-7"></a>        AbstractBufferProvider<span class="op">*</span> bufferProvider<span class="op">)</span> <span class="op">=</span> <span class="dv">0</span><span class="op">;</span></span>
+<span id="cb1-8"><a href="#cb1-8"></a>    <span class="op">[[</span><span class="at">nodiscard</span><span class="op">]]</span> <span class="kw">virtual</span> <span class="dt">uint64_t</span> getNumberOfTuples<span class="op">()</span> <span class="at">const</span> <span class="op">=</span> <span class="dv">0</span><span class="op">;</span></span>
+<span id="cb1-9"><a href="#cb1-9"></a><span class="op">};</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>The concrete implementation is <code>ChainedHashMap</code>, in <code>nes-nautilus/src/Nautilus/Interface/HashMap/ChainedHashMap/ChainedHashMap.cpp</code>. The insertion path is worth reading in full because it shows how the hash map’s storage is actually paged across <code>TupleBuffer</code>s:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb2-1"><a href="#cb2-1"></a><span class="co">// nes-nautilus/src/Nautilus/Interface/HashMap/ChainedHashMap/ChainedHashMap.cpp (sketch)</span></span>
+<span id="cb2-2"><a href="#cb2-2"></a>AbstractHashMapEntry<span class="op">*</span> ChainedHashMap<span class="op">::</span>insertEntry<span class="op">(</span></span>
+<span id="cb2-3"><a href="#cb2-3"></a>    <span class="at">const</span> HashFunction<span class="op">::</span>HashValue<span class="op">::</span><span class="dt">raw_type</span> hash<span class="op">,</span></span>
+<span id="cb2-4"><a href="#cb2-4"></a>    AbstractBufferProvider<span class="op">*</span> bufferProvider<span class="op">)</span></span>
+<span id="cb2-5"><a href="#cb2-5"></a><span class="op">{</span></span>
+<span id="cb2-6"><a href="#cb2-6"></a>    <span class="co">// Step 0: lazy bucket-array initialisation</span></span>
+<span id="cb2-7"><a href="#cb2-7"></a>    <span class="cf">if</span> <span class="op">(</span>entries <span class="op">==</span> <span class="kw">nullptr</span><span class="op">)</span> <span class="op">[[</span><span class="at">unlikely</span><span class="op">]]</span> <span class="op">{</span></span>
+<span id="cb2-8"><a href="#cb2-8"></a>        <span class="at">const</span> <span class="kw">auto</span> totalSpace <span class="op">=</span> <span class="op">(</span>numberOfChains <span class="op">+</span> <span class="dv">1</span><span class="op">)</span> <span class="op">*</span> <span class="kw">sizeof</span><span class="op">(</span>ChainedHashMapEntry<span class="op">*);</span></span>
+<span id="cb2-9"><a href="#cb2-9"></a>        entryBuffer <span class="op">=</span> bufferProvider<span class="op">-&gt;</span>getUnpooledBuffer<span class="op">(</span>totalSpace<span class="op">);</span></span>
+<span id="cb2-10"><a href="#cb2-10"></a>        entries <span class="op">=</span> <span class="kw">reinterpret_cast</span><span class="op">&lt;</span>ChainedHashMapEntry<span class="op">**&gt;(</span></span>
+<span id="cb2-11"><a href="#cb2-11"></a>            entryBuffer<span class="op">.</span>getAvailableMemoryArea<span class="op">().</span>data<span class="op">());</span></span>
+<span id="cb2-12"><a href="#cb2-12"></a>        <span class="bu">std::</span>memset<span class="op">(</span>entries<span class="op">,</span> <span class="dv">0</span><span class="op">,</span> entryBuffer<span class="op">-&gt;</span>getBufferSize<span class="op">());</span></span>
+<span id="cb2-13"><a href="#cb2-13"></a>    <span class="op">}</span></span>
+<span id="cb2-14"><a href="#cb2-14"></a>    <span class="co">// Step 1: allocate a new storage page if the current one is full</span></span>
+<span id="cb2-15"><a href="#cb2-15"></a>    <span class="cf">if</span> <span class="op">(</span>numberOfTuples <span class="op">%</span> entriesPerPage <span class="op">==</span> <span class="dv">0</span><span class="op">)</span> <span class="op">{</span></span>
+<span id="cb2-16"><a href="#cb2-16"></a>        storageSpace<span class="op">.</span>emplace_back<span class="op">(</span>bufferProvider<span class="op">-&gt;</span>getUnpooledBuffer<span class="op">(</span>pageSize<span class="op">).</span>value<span class="op">());</span></span>
+<span id="cb2-17"><a href="#cb2-17"></a>    <span class="op">}</span></span>
+<span id="cb2-18"><a href="#cb2-18"></a>    <span class="co">// Step 2: locate the next entry slot in the current page</span></span>
+<span id="cb2-19"><a href="#cb2-19"></a>    <span class="at">const</span> <span class="kw">auto</span> pageIndex <span class="op">=</span> numberOfTuples <span class="op">/</span> entriesPerPage<span class="op">;</span></span>
+<span id="cb2-20"><a href="#cb2-20"></a>    <span class="kw">auto</span><span class="op">&amp;</span> bufferStorage <span class="op">=</span> storageSpace<span class="op">[</span>pageIndex<span class="op">];</span></span>
+<span id="cb2-21"><a href="#cb2-21"></a>    <span class="at">const</span> <span class="kw">auto</span> entryOffset <span class="op">=</span></span>
+<span id="cb2-22"><a href="#cb2-22"></a>        <span class="op">(</span>numberOfTuples <span class="op">-</span> pageIndex <span class="op">*</span> entriesPerPage<span class="op">)</span> <span class="op">*</span> entrySize<span class="op">;</span></span>
+<span id="cb2-23"><a href="#cb2-23"></a>    <span class="co">// Step 3: chain at bucket head (head of bucket's linked list)</span></span>
+<span id="cb2-24"><a href="#cb2-24"></a>    <span class="at">const</span> <span class="kw">auto</span> entryPos <span class="op">=</span> hash <span class="op">&amp;</span> mask<span class="op">;</span></span>
+<span id="cb2-25"><a href="#cb2-25"></a>    <span class="kw">auto</span><span class="op">*</span> <span class="at">const</span> newEntry <span class="op">=</span> <span class="kw">new</span> <span class="op">(</span></span>
+<span id="cb2-26"><a href="#cb2-26"></a>        bufferStorage<span class="op">.</span>getAvailableMemoryArea<span class="op">().</span>subspan<span class="op">(</span>entryOffset<span class="op">).</span>data<span class="op">())</span></span>
+<span id="cb2-27"><a href="#cb2-27"></a>        ChainedHashMapEntry<span class="op">(</span>hash<span class="op">);</span></span>
+<span id="cb2-28"><a href="#cb2-28"></a>    newEntry<span class="op">-&gt;</span>next <span class="op">=</span> entries<span class="op">[</span>entryPos<span class="op">];</span></span>
+<span id="cb2-29"><a href="#cb2-29"></a>    entries<span class="op">[</span>entryPos<span class="op">]</span> <span class="op">=</span> newEntry<span class="op">;</span></span>
+<span id="cb2-30"><a href="#cb2-30"></a>    <span class="op">++</span>numberOfTuples<span class="op">;</span></span>
+<span id="cb2-31"><a href="#cb2-31"></a>    <span class="cf">return</span> newEntry<span class="op">;</span></span>
+<span id="cb2-32"><a href="#cb2-32"></a><span class="op">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Four observations.</p>
+<p><strong>The bucket array is allocated lazily.</strong> First insertion allocates <code>(numberOfChains + 1) * sizeof(pointer)</code> bytes via an unpooled buffer (sized for the array, not the standard 8 KiB). Empty hash maps cost nothing.</p>
+<p><strong>Entries are stored in a sequence of pages.</strong> Each page is one <code>TupleBuffer</code> from the pool; once full, a new buffer is allocated. This is what “paged across TupleBuffers” means in practice — the hash map is not one contiguous arena, it is a vector of pages, and the buffer pool is the allocator.</p>
+<p><strong>Insertion is at the <em>head</em> of the bucket chain.</strong> Newly- inserted entries are visited first by probes. For a join where the most recently inserted records are the most likely matches, this is faster than tail insertion.</p>
+<p><strong>The mask is a power-of-two AND.</strong> <code>hash &amp; mask</code> requires <code>mask = numberOfChains - 1</code> and <code>numberOfChains</code> to be a power of two. This is faster than modulo and standard for in-memory hash tables; the cost is that the chain count must round up to a power of two.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Example 16.1: a hash join in flight">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Example 16.1: a hash join in flight
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>For <code>SELECT * FROM r JOIN s ON r.k = s.k INTO matched</code>, the build side accumulates <code>r</code>’s tuples until <code>r</code>’s watermark advances past the join window’s end. Suppose <code>r</code> has 100,000 tuples; the hash map holds 100,000 entries, paged across roughly 30 buffers (each holding ~3,300 entries depending on entry size).</p>
+<p>When <code>s</code>’s tuples arrive, the probe operator hashes each, jumps to the entry, walks the collision chain (typically one or two entries per bucket if the hash function is good), and emits one output tuple per match. After the join window closes, the operator handler tears down the hash map, releasing 30 buffers back to the pool.</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-aggregation-state" class="level2" data-number="16.3">
+<h2 data-number="16.3" class="anchored" data-anchor-id="sec-aggregation-state"><span class="header-section-number">16.3</span> 16.3 Aggregation state</h2>
+<p>A windowed aggregation’s state is also a hash map, but the values are <em>partial aggregates</em>, not records:</p>
+<ul>
+<li>For <code>SUM(x)</code>: value is <code>(running_sum, count)</code>.</li>
+<li>For <code>AVG(x)</code>: value is <code>(running_sum, count)</code>, with the average computed at probe time.</li>
+<li>For <code>MIN(x)</code>: value is <code>(running_min)</code>.</li>
+<li>For <code>COUNT(*)</code>: value is <code>(count)</code>.</li>
+</ul>
+<p>These are small, fixed-size, and combinable. The build side combines incoming tuples into partial aggregates; the probe side, when a window fires, walks the hash map and emits one record per key with the final aggregate value.</p>
+<p>For sliding windows where multiple windows can be live simultaneously, the state grows linearly in the number of active windows. The engine partitions state by window: each (window, key) pair gets its own hash-map entry. When a window fires <em>and</em> all sliding windows that include the same data have either fired or been GC’d, the state for that window is freed.</p>
+<hr>
+</section>
+<section id="sec-slices" class="level2" data-number="16.4">
+<h2 data-number="16.4" class="anchored" data-anchor-id="sec-slices"><span class="header-section-number">16.4</span> 16.4 The slice abstraction</h2>
+<p>Window state has a finite lifetime: it lives until the window fires, plus a grace period for late data, then it can be released. The engine’s mechanism for this is the <em>slice</em>.</p>
+<p>A slice is a contiguous time range of state. For tumbling windows of size 1 second, every slice is also 1 second. For sliding windows of size 5 seconds, advancing every 1 second, the slice boundary is the GCD of the size and advance — 1 second. The mechanic is in <code>WindowSlicesStoreInterface</code> (in <code>nes-physical-operators/include/</code>).</p>
+<p>When a tuple arrives with event-time timestamp <code>t</code>, it is assigned to a slice. Each slice has an end time <code>t_end</code>; when the engine’s notion of progress crosses <code>t_end</code>, the slice can be probed (its windows fire) and, after the probe, garbage collected.</p>
+<p>The handler is <code>WindowBasedOperatorHandler</code>, defined in <code>nes-physical-operators/include/</code>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb3-1"><a href="#cb3-1"></a><span class="co">// nes-physical-operators/include/WindowBasedOperatorHandler.hpp (sketch)</span></span>
+<span id="cb3-2"><a href="#cb3-2"></a><span class="kw">class</span> WindowBasedOperatorHandler <span class="op">:</span> <span class="kw">public</span> OperatorHandler <span class="op">{</span></span>
+<span id="cb3-3"><a href="#cb3-3"></a>    <span class="bu">std::</span>unique_ptr<span class="op">&lt;</span>WindowSlicesStoreInterface<span class="op">&gt;</span> sliceAndWindowStore<span class="op">;</span></span>
+<span id="cb3-4"><a href="#cb3-4"></a>    <span class="bu">std::</span>unique_ptr<span class="op">&lt;</span>MultiOriginWatermarkProcessor<span class="op">&gt;</span> watermarkProcessorBuild<span class="op">;</span></span>
+<span id="cb3-5"><a href="#cb3-5"></a>    <span class="bu">std::</span>unique_ptr<span class="op">&lt;</span>MultiOriginWatermarkProcessor<span class="op">&gt;</span> watermarkProcessorProbe<span class="op">;</span></span>
+<span id="cb3-6"><a href="#cb3-6"></a><span class="kw">public</span><span class="op">:</span></span>
+<span id="cb3-7"><a href="#cb3-7"></a>    WindowBasedOperatorHandler<span class="op">(</span></span>
+<span id="cb3-8"><a href="#cb3-8"></a>        <span class="at">const</span> <span class="bu">std::</span>vector<span class="op">&lt;</span>OriginId<span class="op">&gt;&amp;</span> inputOrigins<span class="op">,</span></span>
+<span id="cb3-9"><a href="#cb3-9"></a>        <span class="at">const</span> OriginId outputOriginId<span class="op">,</span></span>
+<span id="cb3-10"><a href="#cb3-10"></a>        <span class="bu">std::</span>unique_ptr<span class="op">&lt;</span>WindowSlicesStoreInterface<span class="op">&gt;</span> sliceAndWindowStore<span class="op">);</span></span>
+<span id="cb3-11"><a href="#cb3-11"></a>    <span class="dt">void</span> setWorkerThreads<span class="op">(</span><span class="dt">uint64_t</span> numberOfWorkerThreads<span class="op">);</span></span>
+<span id="cb3-12"><a href="#cb3-12"></a>    <span class="dt">void</span> checkAndTriggerWindows<span class="op">(</span><span class="at">const</span> BufferMetaData<span class="op">&amp;,</span> PipelineExecutionContext<span class="op">*);</span></span>
+<span id="cb3-13"><a href="#cb3-13"></a>    <span class="kw">virtual</span> <span class="dt">void</span> triggerSlices<span class="op">(</span></span>
+<span id="cb3-14"><a href="#cb3-14"></a>        <span class="at">const</span> <span class="bu">std::</span>map<span class="op">&lt;</span>WindowInfoAndSequenceNumber<span class="op">,</span></span>
+<span id="cb3-15"><a href="#cb3-15"></a>                       <span class="bu">std::</span>vector<span class="op">&lt;</span><span class="bu">std::</span>shared_ptr<span class="op">&lt;</span>Slice<span class="op">&gt;&gt;&gt;&amp;,</span></span>
+<span id="cb3-16"><a href="#cb3-16"></a>        PipelineExecutionContext<span class="op">*)</span> <span class="op">=</span> <span class="dv">0</span><span class="op">;</span></span>
+<span id="cb3-17"><a href="#cb3-17"></a><span class="op">};</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>The handler holds <strong>two <code>MultiOriginWatermarkProcessor</code>s</strong>: <code>watermarkProcessorBuild</code> for input origins and <code>watermarkProcessorProbe</code> for the single output origin (the output of the operator becomes a new origin in its own right — see Chapter 7). The constructor wires them up:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb4-1"><a href="#cb4-1"></a><span class="co">// nes-physical-operators/src/WindowBasedOperatorHandler.cpp (sketch)</span></span>
+<span id="cb4-2"><a href="#cb4-2"></a>WindowBasedOperatorHandler<span class="op">::</span>WindowBasedOperatorHandler<span class="op">(</span></span>
+<span id="cb4-3"><a href="#cb4-3"></a>    <span class="at">const</span> <span class="bu">std::</span>vector<span class="op">&lt;</span>OriginId<span class="op">&gt;&amp;</span> inputOrigins<span class="op">,</span></span>
+<span id="cb4-4"><a href="#cb4-4"></a>    <span class="at">const</span> OriginId outputOriginId<span class="op">,</span></span>
+<span id="cb4-5"><a href="#cb4-5"></a>    <span class="bu">std::</span>unique_ptr<span class="op">&lt;</span>WindowSlicesStoreInterface<span class="op">&gt;</span> sliceAndWindowStore<span class="op">)</span></span>
+<span id="cb4-6"><a href="#cb4-6"></a>    <span class="op">:</span> sliceAndWindowStore<span class="op">(</span><span class="bu">std::</span>move<span class="op">(</span>sliceAndWindowStore<span class="op">)),</span></span>
+<span id="cb4-7"><a href="#cb4-7"></a>      watermarkProcessorBuild<span class="op">(</span></span>
+<span id="cb4-8"><a href="#cb4-8"></a>          <span class="bu">std::</span>make_unique<span class="op">&lt;</span>MultiOriginWatermarkProcessor<span class="op">&gt;(</span>inputOrigins<span class="op">)),</span></span>
+<span id="cb4-9"><a href="#cb4-9"></a>      watermarkProcessorProbe<span class="op">(</span></span>
+<span id="cb4-10"><a href="#cb4-10"></a>          <span class="bu">std::</span>make_unique<span class="op">&lt;</span>MultiOriginWatermarkProcessor<span class="op">&gt;(</span></span>
+<span id="cb4-11"><a href="#cb4-11"></a>              <span class="bu">std::</span>vector<span class="op">{</span>outputOriginId<span class="op">}))</span></span>
+<span id="cb4-12"><a href="#cb4-12"></a><span class="op">{}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><code>checkAndTriggerWindows</code> is called as buffers arrive and watermarks advance. It examines the build watermark, identifies any slices whose end time has been crossed, and calls <code>triggerSlices</code> for them. <code>triggerSlices</code> is operator-specific — for an aggregation, it walks the per-slice hash maps and emits one tuple per group.</p>
+<p>Each window slice carries a hash map <em>per worker thread</em>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb5-1"><a href="#cb5-1"></a><span class="co">// nes-physical-operators/include/Aggregation/AggregationSlice.hpp (sketch)</span></span>
+<span id="cb5-2"><a href="#cb5-2"></a><span class="kw">class</span> AggregationSlice <span class="kw">final</span> <span class="op">:</span> <span class="kw">public</span> HashMapSlice <span class="op">{</span></span>
+<span id="cb5-3"><a href="#cb5-3"></a><span class="kw">public</span><span class="op">:</span></span>
+<span id="cb5-4"><a href="#cb5-4"></a>    HashMap<span class="op">*</span> getHashMapPtr<span class="op">(</span>WorkerThreadId workerThreadId<span class="op">)</span> <span class="at">const</span><span class="op">;</span></span>
+<span id="cb5-5"><a href="#cb5-5"></a>    HashMap<span class="op">*</span> getHashMapPtrOrCreate<span class="op">(</span>WorkerThreadId workerThreadId<span class="op">);</span></span>
+<span id="cb5-6"><a href="#cb5-6"></a><span class="op">};</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Per-thread hash maps avoid contention on the hot path: each worker writes into its own shard. At trigger time, the probe phase merges shards before emitting results. This is a classical sharding-vs-locking trade-off, and the code chose sharding.</p>
+<p>A small state-machine governs each window’s lifetime: <code>WINDOW_FILLING</code> → <code>EMITTED_TO_PROBE</code> (or <code>WAITING_ON_TERMINATION</code> on shutdown). The store advances windows through these states based on watermark progress; once emitted, the slice’s storage is eligible for garbage collection.</p>
+<hr>
+</section>
+<section id="sec-concurrent-state" class="level2" data-number="16.5">
+<h2 data-number="16.5" class="anchored" data-anchor-id="sec-concurrent-state"><span class="header-section-number">16.5</span> 16.5 Concurrent state, safely</h2>
+<p>State is shared between worker threads. Multiple workers can simultaneously be inserting into the same build’s hash map, or probing the same join’s state, or accumulating into the same window’s partial aggregates.</p>
+<p>NebulaStream handles concurrency in three layers.</p>
+<p><strong>Lock-free at the hash-map level.</strong> The hash map’s insertion uses atomic CAS for slot acquisition. Two workers inserting different keys do not contend; two workers inserting the same key contend briefly on the value-chain head pointer.</p>
+<p><strong>Per-window watermark coordination.</strong> Two watermark processors live on each <code>WindowBasedOperatorHandler</code>: one tracks the build side, one tracks the probe side. The watermarks are advanced atomically; a window’s transition from “open” to “ready to fire” is a single atomic check.</p>
+<p><strong>Coarse-grained for less-contended state.</strong> State that is not on the hot path (the slice store metadata, the per-handler GC list) is protected by a <code>folly::Synchronized</code> wrapper, which is essentially a mutex with a more ergonomic API.</p>
+<p>The engine chooses lock-freedom on the hot paths and locks elsewhere — the standard concurrent-data-structures trade-off.</p>
+<hr>
+</section>
+<section id="sec-gc" class="level2" data-number="16.6">
+<h2 data-number="16.6" class="anchored" data-anchor-id="sec-gc"><span class="header-section-number">16.6</span> 16.6 Garbage collection</h2>
+<p>State has to be released. The engine releases it conservatively via the slice-and-watermark machinery from Chapter 7:</p>
+<ol type="1">
+<li>A slice is “complete” when all upstream watermarks have passed the slice’s end time.</li>
+<li>A complete slice is “fired” — its windows trigger and emit results.</li>
+<li>After firing, the slice is “garbage” — eligible for release.</li>
+<li>The handler’s <code>garbageCollectSlicesAndWindows</code> walks the garbage list and frees the underlying buffers.</li>
+</ol>
+<p>The release is to the buffer pool, not to the OS. Buffers go back into the pool’s queue and are immediately available for reuse by fresh state.</p>
+<p>Late-arriving data that targets a freed slice is <em>dropped</em>, not re-incorporated. This matches the engine’s overall stance: when in doubt, prefer correctness over leniency. Flink’s “late side output” mechanism would be a future addition.</p>
+<p>A note worth making before this chapter ends: NebulaStream’s <em>execution-state</em> — the hash maps and PagedVectors we have been discussing — is in-memory only. There is no checkpointing path yet that would let a worker crash and resume from a snapshot. What does exist is a small piece of <em>client-side query metadata</em> persistence in <code>nes-frontend/apps/cli/QueryStateBackend.hpp</code> that records query IDs and timestamps under <code>~/.local/state/nebucli/</code>. That is REPL/CLI bookkeeping, not execution-state recovery. The two are easy to confuse; Chapter 22 spells out the difference.</p>
+<hr>
+</section>
+<section id="sec-ch16-summary" class="level2" data-number="16.7">
+<h2 data-number="16.7" class="anchored" data-anchor-id="sec-ch16-summary"><span class="header-section-number">16.7</span> Summary</h2>
+<p>Stateful operators in NebulaStream own their state through operator handlers, which are runtime objects identified by an <code>OperatorHandlerId</code> and shared between the build and probe halves of the operator. The state is almost always a <code>HashMap</code> keyed on the operator’s grouping/join key, possibly with a <code>PagedVector</code> for collision chains or per-key history. Both data structures are paged across <code>TupleBuffer</code>s from the buffer pool, allowing release back to the pool when a slice’s lifetime ends. Concurrency is handled by lock-free CAS on the hot path and <code>folly::Synchronized</code> locks elsewhere. State is garbage-collected slice-by-slice as watermarks advance; late-arriving data targeting freed slices is silently dropped.</p>
+<hr>
+</section>
+<section id="sec-ch16-exercises" class="level2" data-number="16.8">
+<h2 data-number="16.8" class="anchored" data-anchor-id="sec-ch16-exercises"><span class="header-section-number">16.8</span> Reading exercises</h2>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 16.1: measure state size">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 16.1: measure state size
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Add a counter that logs <code>getNumberOfTuples()</code> on the join’s hash map every second. Run a streaming join with two slow streams. Plot the growth curve. Where does it level off? At what point does GC start releasing state?</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 16.2: pool pressure on join state">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 16.2: pool pressure on join state
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Reduce the buffer pool to 32 buffers (Chapter 4 exercise) and run a join that needs more state than that. What happens? The hash map should fail to allocate; the engine should signal backpressure all the way up to sources. Trace the propagation.</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 16.3: late data drop">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 16.3: late data drop
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Modify a tumbling-window test to inject a tuple whose event time is far in the past — older than the most recently fired window. Confirm that the tuple is dropped silently. What log line records the drop, if any?</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-ch16-refs" class="level2" data-number="16.9">
+<h2 data-number="16.9" class="anchored" data-anchor-id="sec-ch16-refs"><span class="header-section-number">16.9</span> References</h2>
+<ul>
+<li><em>HashMap.</em> <code>nes-nautilus/include/Nautilus/Interface/HashMap/HashMap.hpp</code>.</li>
+<li><em>PagedVector.</em> <code>nes-nautilus/include/Nautilus/Interface/PagedVector/PagedVector.hpp</code>.</li>
+<li><em>WindowBasedOperatorHandler.</em> <code>nes-physical-operators/include/WindowBasedOperatorHandler.hpp</code>.</li>
+<li><em>Linear probing hash tables.</em> H. Knuth, <em>The Art of Computer Programming</em>, vol.&nbsp;3, §6.4.</li>
+<li><em>Streaming joins state management.</em> J. Krämer, B. Seeger. <em>Semantics and Implementation of Continuous Sliding Window Queries Over Data Streams.</em> TODS 2009.</li>
+<li><em>Lock-free hash maps.</em> M. Michael, <em>High Performance Dynamic Lock-Free Hash Tables and List-Based Sets.</em> SPAA 2002.</li>
+</ul>
+
+
+</section>
+
+</main> <!-- /main -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    // Ensure there is a toggle, if there isn't float one in the top right
+    if (window.document.querySelector('.quarto-color-scheme-toggle') === null) {
+      const a = window.document.createElement('a');
+      a.classList.add('top-right');
+      a.classList.add('quarto-color-scheme-toggle');
+      a.href = "";
+      a.onclick = function() { try { window.quartoToggleColorScheme(); } catch {} return false; };
+      const i = window.document.createElement("i");
+      i.classList.add('bi');
+      a.appendChild(i);
+      window.document.body.appendChild(a);
+    }
+    setColorSchemeToggle(hasAlternateSentinel())
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/nebula\.stream");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+            // target, if specified
+            link.setAttribute("target", "_blank");
+            if (link.getAttribute("rel") === null) {
+              link.setAttribute("rel", "noopener");
+            }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+<nav class="page-navigation">
+  <div class="nav-page nav-page-previous">
+      <a href="../chapters/15-two-queue-scheduler.html" class="pagination-link" aria-label="The Two-Queue Scheduler and Deadlock Avoidance">
+        <i class="bi bi-arrow-left-short"></i> <span class="nav-page-text"><span class="chapter-number">15</span>&nbsp; <span class="chapter-title">The Two-Queue Scheduler and Deadlock Avoidance</span></span>
+      </a>          
+  </div>
+  <div class="nav-page nav-page-next">
+      <a href="../chapters/17-error-handling.html" class="pagination-link" aria-label="Error Handling, Logging, and Observability">
+        <span class="nav-page-text"><span class="chapter-number">17</span>&nbsp; <span class="chapter-title">Error Handling, Logging, and Observability</span></span> <i class="bi bi-arrow-right-short"></i>
+      </a>
+  </div>
+</nav>
+</div> <!-- /content -->
+<footer class="footer">
+  <div class="nav-footer">
+    <div class="nav-footer-left">
+<p>© CC BY-SA — code excerpts under Apache-2.0 from NebulaStream</p>
+</div>   
+    <div class="nav-footer-center">
+<p><a href="https://nebula.stream">nebula.stream</a> · <a href="https://github.com/nebulastream/nebulastream">github</a></p>
+<div class="toc-actions d-sm-block d-md-none"><ul><li><a href="https://github.com/nebulastream/nebulastream-book/edit/main/chapters/16-stateful-operators.qmd" class="toc-action"><i class="bi bi-github"></i>Edit this page</a></li><li><a href="https://github.com/nebulastream/nebulastream-book/issues/new" class="toc-action"><i class="bi empty"></i>Report an issue</a></li></ul></div></div>
+    <div class="nav-footer-right">
+<p>Built with <a href="https://quarto.org">Quarto</a></p>
+</div>
+  </div>
+</footer>
+
+
+
+
+<script src="../site_libs/quarto-html/zenscroll-min.js"></script>
+</body></html>

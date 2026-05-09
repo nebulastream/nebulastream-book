@@ -1,0 +1,1368 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.9.37">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>7&nbsp; Time, Watermarks, and Progress – NebulaStream: A Stream Processing Engine from the Inside Out</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+/* CSS for citations */
+div.csl-bib-body { }
+div.csl-entry {
+  clear: both;
+}
+.hanging-indent div.csl-entry {
+  margin-left:2em;
+  text-indent:-2em;
+}
+div.csl-left-margin {
+  min-width:2em;
+  float:left;
+}
+div.csl-right-inline {
+  margin-left:2em;
+  padding-left:1em;
+}
+div.csl-indent {
+  margin-left: 2em;
+}</style>
+
+
+<script src="../site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="../site_libs/quarto-nav/headroom.min.js"></script>
+<script src="../site_libs/clipboard/clipboard.min.js"></script>
+<script src="../site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="../site_libs/quarto-search/fuse.min.js"></script>
+<script src="../site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="../">
+<link href="../chapters/08-sources-sinks.html" rel="next">
+<link href="../chapters/06-logical-algebra.html" rel="prev">
+<link href="../figures/favicon.ico" rel="icon">
+<script src="../site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="../site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="../site_libs/quarto-html/popper.min.js"></script>
+<script src="../site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="../site_libs/quarto-html/anchor.min.js"></script>
+<link href="../site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-f5b116b226ab7871a339bcb27e385d4f.css" rel="stylesheet" class="quarto-color-scheme" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-dark-fa7fa037caeb5c295dcabee9de8bbbbc.css" rel="stylesheet" class="quarto-color-scheme quarto-color-alternate" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-f5b116b226ab7871a339bcb27e385d4f.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
+<script src="../site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="../site_libs/bootstrap/bootstrap-59cd90b3a31d59781837685af5616a03.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-7555ce834b751ef39c6101133797c128.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-59cd90b3a31d59781837685af5616a03.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "location": "sidebar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "start",
+  "type": "textbox",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+<style>html{ scroll-behavior: smooth; }</style>
+
+
+</head>
+
+<body class="nav-sidebar docked quarto-light"><script id="quarto-html-before-body" type="application/javascript">
+    const toggleBodyColorMode = (bsSheetEl) => {
+      const mode = bsSheetEl.getAttribute("data-mode");
+      const bodyEl = window.document.querySelector("body");
+      if (mode === "dark") {
+        bodyEl.classList.add("quarto-dark");
+        bodyEl.classList.remove("quarto-light");
+      } else {
+        bodyEl.classList.add("quarto-light");
+        bodyEl.classList.remove("quarto-dark");
+      }
+    }
+    const toggleBodyColorPrimary = () => {
+      const bsSheetEl = window.document.querySelector("link#quarto-bootstrap:not([rel=disabled-stylesheet])");
+      if (bsSheetEl) {
+        toggleBodyColorMode(bsSheetEl);
+      }
+    }
+    const setColorSchemeToggle = (alternate) => {
+      const toggles = window.document.querySelectorAll('.quarto-color-scheme-toggle');
+      for (let i=0; i < toggles.length; i++) {
+        const toggle = toggles[i];
+        if (toggle) {
+          if (alternate) {
+            toggle.classList.add("alternate");
+          } else {
+            toggle.classList.remove("alternate");
+          }
+        }
+      }
+    };
+    const toggleColorMode = (alternate) => {
+      // Switch the stylesheets
+      const primaryStylesheets = window.document.querySelectorAll('link.quarto-color-scheme:not(.quarto-color-alternate)');
+      const alternateStylesheets = window.document.querySelectorAll('link.quarto-color-scheme.quarto-color-alternate');
+      manageTransitions('#quarto-margin-sidebar .nav-link', false);
+      if (alternate) {
+        // note: dark is layered on light, we don't disable primary!
+        enableStylesheet(alternateStylesheets);
+        for (const sheetNode of alternateStylesheets) {
+          if (sheetNode.id === "quarto-bootstrap") {
+            toggleBodyColorMode(sheetNode);
+          }
+        }
+      } else {
+        disableStylesheet(alternateStylesheets);
+        enableStylesheet(primaryStylesheets)
+        toggleBodyColorPrimary();
+      }
+      manageTransitions('#quarto-margin-sidebar .nav-link', true);
+      // Switch the toggles
+      setColorSchemeToggle(alternate)
+      // Hack to workaround the fact that safari doesn't
+      // properly recolor the scrollbar when toggling (#1455)
+      if (navigator.userAgent.indexOf('Safari') > 0 && navigator.userAgent.indexOf('Chrome') == -1) {
+        manageTransitions("body", false);
+        window.scrollTo(0, 1);
+        setTimeout(() => {
+          window.scrollTo(0, 0);
+          manageTransitions("body", true);
+        }, 40);
+      }
+    }
+    const disableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        stylesheet.rel = 'disabled-stylesheet';
+      }
+    }
+    const enableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        if(stylesheet.rel !== 'stylesheet') { // for Chrome, which will still FOUC without this check
+          stylesheet.rel = 'stylesheet';
+        }
+      }
+    }
+    const manageTransitions = (selector, allowTransitions) => {
+      const els = window.document.querySelectorAll(selector);
+      for (let i=0; i < els.length; i++) {
+        const el = els[i];
+        if (allowTransitions) {
+          el.classList.remove('notransition');
+        } else {
+          el.classList.add('notransition');
+        }
+      }
+    }
+    const isFileUrl = () => {
+      return window.location.protocol === 'file:';
+    }
+    const hasAlternateSentinel = () => {
+      let styleSentinel = getColorSchemeSentinel();
+      if (styleSentinel !== null) {
+        return styleSentinel === "alternate";
+      } else {
+        return false;
+      }
+    }
+    const setStyleSentinel = (alternate) => {
+      const value = alternate ? "alternate" : "default";
+      if (!isFileUrl()) {
+        window.localStorage.setItem("quarto-color-scheme", value);
+      } else {
+        localAlternateSentinel = value;
+      }
+    }
+    const getColorSchemeSentinel = () => {
+      if (!isFileUrl()) {
+        const storageValue = window.localStorage.getItem("quarto-color-scheme");
+        return storageValue != null ? storageValue : localAlternateSentinel;
+      } else {
+        return localAlternateSentinel;
+      }
+    }
+    const toggleGiscusIfUsed = (isAlternate, darkModeDefault) => {
+      const baseTheme = document.querySelector('#giscus-base-theme')?.value ?? 'light';
+      const alternateTheme = document.querySelector('#giscus-alt-theme')?.value ?? 'dark';
+      let newTheme = '';
+      if(authorPrefersDark) {
+        newTheme = isAlternate ? baseTheme : alternateTheme;
+      } else {
+        newTheme = isAlternate ? alternateTheme : baseTheme;
+      }
+      const changeGiscusTheme = () => {
+        // From: https://github.com/giscus/giscus/issues/336
+        const sendMessage = (message) => {
+          const iframe = document.querySelector('iframe.giscus-frame');
+          if (!iframe) return;
+          iframe.contentWindow.postMessage({ giscus: message }, 'https://giscus.app');
+        }
+        sendMessage({
+          setConfig: {
+            theme: newTheme
+          }
+        });
+      }
+      const isGiscussLoaded = window.document.querySelector('iframe.giscus-frame') !== null;
+      if (isGiscussLoaded) {
+        changeGiscusTheme();
+      }
+    };
+    const authorPrefersDark = false;
+    const darkModeDefault = authorPrefersDark;
+      document.querySelector('link#quarto-text-highlighting-styles.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+      document.querySelector('link#quarto-bootstrap.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+    let localAlternateSentinel = darkModeDefault ? 'alternate' : 'default';
+    // Dark / light mode switch
+    window.quartoToggleColorScheme = () => {
+      // Read the current dark / light value
+      let toAlternate = !hasAlternateSentinel();
+      toggleColorMode(toAlternate);
+      setStyleSentinel(toAlternate);
+      toggleGiscusIfUsed(toAlternate, darkModeDefault);
+      window.dispatchEvent(new Event('resize'));
+    };
+    // Switch to dark mode if need be
+    if (hasAlternateSentinel()) {
+      toggleColorMode(true);
+    } else {
+      toggleColorMode(false);
+    }
+  </script>
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top">
+  <nav class="quarto-secondary-nav">
+    <div class="container-fluid d-flex">
+      <button type="button" class="quarto-btn-toggle btn" data-bs-toggle="collapse" role="button" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+        <i class="bi bi-layout-text-sidebar-reverse"></i>
+      </button>
+        <nav class="quarto-page-breadcrumbs" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../chapters/05-query-language.html">The Query Frontier</a></li><li class="breadcrumb-item"><a href="../chapters/07-watermarks.html"><span class="chapter-number">7</span>&nbsp; <span class="chapter-title">Time, Watermarks, and Progress</span></a></li></ol></nav>
+        <a class="flex-grow-1" role="navigation" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">      
+        </a>
+      <button type="button" class="btn quarto-search-button" aria-label="Search" onclick="window.quartoOpenSearch();">
+        <i class="bi bi-search"></i>
+      </button>
+    </div>
+  </nav>
+</header>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article">
+<!-- sidebar -->
+  <nav id="quarto-sidebar" class="sidebar collapse collapse-horizontal quarto-sidebar-collapse-item sidebar-navigation docked overflow-auto">
+    <div class="pt-lg-2 mt-2 text-left sidebar-header sidebar-header-stacked">
+      <a href="../index.html" class="sidebar-logo-link">
+      <img src="../figures/neslogo.png" alt="" class="sidebar-logo light-content py-0 d-lg-inline d-none">
+      <img src="../figures/neslogo.png" alt="" class="sidebar-logo dark-content py-0 d-lg-inline d-none">
+      </a>
+    <div class="sidebar-title mb-0 py-0">
+      <a href="../">NebulaStream Internals</a> 
+        <div class="sidebar-tools-main tools-wide">
+    <a href="https://github.com/nebulastream/nebulastream-book" title="Source Code" class="quarto-navigation-tool px-1" aria-label="Source Code"><i class="bi bi-github"></i></a>
+  <a href="" class="quarto-color-scheme-toggle quarto-navigation-tool  px-1" onclick="window.quartoToggleColorScheme(); return false;" title="Toggle dark mode"><i class="bi"></i></a>
+  <a href="" class="quarto-reader-toggle quarto-navigation-tool px-1" onclick="window.quartoToggleReader(); return false;" title="Toggle reader mode">
+  <div class="quarto-reader-toggle-btn">
+  <i class="bi"></i>
+  </div>
+</a>
+</div>
+    </div>
+      </div>
+        <div class="mt-2 flex-shrink-0 align-items-center">
+        <div class="sidebar-search">
+        <div id="quarto-search" class="" title="Search"></div>
+        </div>
+        </div>
+    <div class="sidebar-menu-container"> 
+    <ul class="list-unstyled mt-1">
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../index.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Preface</span></a>
+  </div>
+</li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-1" role="navigation" aria-expanded="true">
+ <span class="menu-text">Foundations</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-1" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-1" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/01-why-streaming.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">1</span>&nbsp; <span class="chapter-title">Why Stream Processing? Why Another Engine?</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/02-system-tour.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">2</span>&nbsp; <span class="chapter-title">System Tour: From SQL to Native Code</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/03-data-model.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">3</span>&nbsp; <span class="chapter-title">Data Model and Type System</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/04-buffer-management.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">4</span>&nbsp; <span class="chapter-title">Buffer Management and Memory Layout</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-2" role="navigation" aria-expanded="true">
+ <span class="menu-text">The Query Frontier</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-2" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-2" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/05-query-language.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">5</span>&nbsp; <span class="chapter-title">The Query Language and Parser</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/06-logical-algebra.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">6</span>&nbsp; <span class="chapter-title">Logical Operator Algebra</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/07-watermarks.html" class="sidebar-item-text sidebar-link active">
+ <span class="menu-text"><span class="chapter-number">7</span>&nbsp; <span class="chapter-title">Time, Watermarks, and Progress</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/08-sources-sinks.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">8</span>&nbsp; <span class="chapter-title">Sources, Sinks, and Input Formatters</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-3" role="navigation" aria-expanded="true">
+ <span class="menu-text">Optimization and Compilation</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-3" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-3" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/09-rule-based-optimization.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">9</span>&nbsp; <span class="chapter-title">Rule-Based Logical Optimization</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/10-physical-lowering.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">10</span>&nbsp; <span class="chapter-title">Physical Lowering and Operator Choice</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/11-pipelining.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">11</span>&nbsp; <span class="chapter-title">Pipelining and Compiled Plans</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/12-nautilus-codegen.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">12</span>&nbsp; <span class="chapter-title">JIT Code Generation with Nautilus and MLIR</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/13-plugins.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">13</span>&nbsp; <span class="chapter-title">Plugin Registries and Extensibility</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-4" role="navigation" aria-expanded="true">
+ <span class="menu-text">Runtime and Execution</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-4" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-4" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/14-task-execution.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">14</span>&nbsp; <span class="chapter-title">Task-Based Execution Model</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/15-two-queue-scheduler.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">15</span>&nbsp; <span class="chapter-title">The Two-Queue Scheduler and Deadlock Avoidance</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/16-stateful-operators.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">16</span>&nbsp; <span class="chapter-title">Stateful Operators and State Management</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/17-error-handling.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">17</span>&nbsp; <span class="chapter-title">Error Handling, Logging, and Observability</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/18-frontends.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">18</span>&nbsp; <span class="chapter-title">The Worker Process and Client Frontends</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-5" role="navigation" aria-expanded="true">
+ <span class="menu-text">Operations and Frontiers</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-5" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-5" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/19-distributed-deployment.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">19</span>&nbsp; <span class="chapter-title">Distributed Deployment: Cloud, Fog, Edge</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/20-testing.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">20</span>&nbsp; <span class="chapter-title">Testing: Unit, Integration, and Systests</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/21-benchmarking.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">21</span>&nbsp; <span class="chapter-title">Benchmarking and Performance Engineering</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/22-open-problems.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">22</span>&nbsp; <span class="chapter-title">Where to Next: Open Problems</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../references.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">References</span></a>
+  </div>
+</li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-6" role="navigation" aria-expanded="true">
+ <span class="menu-text">Appendices</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-6" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-6" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/A-build.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Building NebulaStream</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/B-conventions.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Coding Conventions</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/C-glossary.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Glossary</span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+    </ul>
+    </div>
+</nav>
+<div id="quarto-sidebar-glass" class="quarto-sidebar-collapse-item" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item"></div>
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">Table of contents</h2>
+   
+  <ul>
+  <li><a href="#sec-two-clocks" id="toc-sec-two-clocks" class="nav-link active" data-scroll-target="#sec-two-clocks"><span class="header-section-number">7.1</span> 7.1 Two clocks: event time and processing time</a></li>
+  <li><a href="#sec-four-identifiers" id="toc-sec-four-identifiers" class="nav-link" data-scroll-target="#sec-four-identifiers"><span class="header-section-number">7.2</span> 7.2 The four progress identifiers</a></li>
+  <li><a href="#sec-watermark-advance" id="toc-sec-watermark-advance" class="nav-link" data-scroll-target="#sec-watermark-advance"><span class="header-section-number">7.3</span> 7.3 Watermark advancement</a></li>
+  <li><a href="#sec-seq-windows" id="toc-sec-seq-windows" class="nav-link" data-scroll-target="#sec-seq-windows"><span class="header-section-number">7.4</span> 7.4 Why sequence numbers matter for windows</a></li>
+  <li><a href="#sec-chunks" id="toc-sec-chunks" class="nav-link" data-scroll-target="#sec-chunks"><span class="header-section-number">7.5</span> 7.5 Chunks and the SequenceShredder</a></li>
+  <li><a href="#sec-window-types" id="toc-sec-window-types" class="nav-link" data-scroll-target="#sec-window-types"><span class="header-section-number">7.6</span> 7.6 Window types</a></li>
+  <li><a href="#sec-build-probe" id="toc-sec-build-probe" class="nav-link" data-scroll-target="#sec-build-probe"><span class="header-section-number">7.7</span> 7.7 The build/probe split</a></li>
+  <li><a href="#sec-cross-worker-watermarks" id="toc-sec-cross-worker-watermarks" class="nav-link" data-scroll-target="#sec-cross-worker-watermarks"><span class="header-section-number">7.8</span> 7.8 Watermarks across workers</a></li>
+  <li><a href="#sec-gc-state" id="toc-sec-gc-state" class="nav-link" data-scroll-target="#sec-gc-state"><span class="header-section-number">7.9</span> 7.9 Garbage collection: when state can be released</a></li>
+  <li><a href="#sec-ch7-summary" id="toc-sec-ch7-summary" class="nav-link" data-scroll-target="#sec-ch7-summary"><span class="header-section-number">7.10</span> Summary</a></li>
+  <li><a href="#sec-ch7-exercises" id="toc-sec-ch7-exercises" class="nav-link" data-scroll-target="#sec-ch7-exercises"><span class="header-section-number">7.11</span> Reading exercises</a></li>
+  <li><a href="#sec-ch7-refs" id="toc-sec-ch7-refs" class="nav-link" data-scroll-target="#sec-ch7-refs"><span class="header-section-number">7.12</span> References</a></li>
+  </ul>
+<div class="toc-actions"><ul><li><a href="https://github.com/nebulastream/nebulastream-book/edit/main/chapters/07-watermarks.qmd" class="toc-action"><i class="bi bi-github"></i>Edit this page</a></li><li><a href="https://github.com/nebulastream/nebulastream-book/issues/new" class="toc-action"><i class="bi empty"></i>Report an issue</a></li></ul></div></nav>
+    </div>
+<!-- main -->
+<main class="content" id="quarto-document-content">
+
+
+<header id="title-block-header" class="quarto-title-block default"><nav class="quarto-page-breadcrumbs quarto-title-breadcrumbs d-none d-lg-block" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../chapters/05-query-language.html">The Query Frontier</a></li><li class="breadcrumb-item"><a href="../chapters/07-watermarks.html"><span class="chapter-number">7</span>&nbsp; <span class="chapter-title">Time, Watermarks, and Progress</span></a></li></ol></nav>
+<div class="quarto-title">
+<h1 class="title"><span id="sec-watermarks" class="quarto-section-identifier"><span class="chapter-number">7</span>&nbsp; <span class="chapter-title">Time, Watermarks, and Progress</span></span></h1>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<div class="callout callout-style-default callout-note callout-empty-content callout-titled" title="Status: complete first draft">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Status: complete first draft
+</div>
+</div>
+<div class="callout-body-container callout-body">
+
+</div>
+</div>
+<p>If a streaming engine has only one hard problem, it is this one. <em>When can I close a window?</em></p>
+<p>A batch system can close a window because the data is finite: the input file ends, the partition is complete, the day is over. A streaming system cannot. Tuples can arrive out of order, sources can fall behind, the network can hiccup, and a tuple from “ten seconds ago” can show up after a tuple from “five seconds ago.” The engine has to commit to closing a window at <em>some</em> point — otherwise it never produces a result — but committing too early loses data, and committing too late builds an unbounded backlog.</p>
+<p>Watermarks are the answer the streaming community has converged on <span class="citation" data-cites="dataflow-paper">(<a href="../references.html#ref-dataflow-paper" role="doc-biblioref">Akidau et al. 2015</a>)</span>. A watermark is a promise: “no event with a timestamp before <em>t</em> will arrive from this stream after this point.” When all upstream operators have promised a watermark beyond <em>t</em>, the engine can safely close all windows that end at <em>t</em>.</p>
+<p>NebulaStream implements this with a four-tuple of identifiers attached to every <code>TupleBuffer</code>: <code>OriginId</code>, <code>SequenceNumber</code>, <code>ChunkNumber</code>, and <code>Watermark</code>. Three of the four are <em>not</em> timestamps. They exist because watermarks alone are not enough.</p>
+<p>This is one of the longest chapters in the book. The mechanism is intricate, and getting it wrong produces silently incorrect results — the worst kind of bug.</p>
+<hr>
+<section id="sec-two-clocks" class="level2" data-number="7.1">
+<h2 data-number="7.1" class="anchored" data-anchor-id="sec-two-clocks"><span class="header-section-number">7.1</span> 7.1 Two clocks: event time and processing time</h2>
+<p>Every tuple has, at least conceptually, two timestamps.</p>
+<p><strong>Event time.</strong> When the event happened in the real world. A vehicle sensor records its speed at 10:00:00.123. The tuple representing that reading carries 10:00:00.123 as its event-time timestamp.</p>
+<p><strong>Processing time.</strong> When the engine processed the tuple. The tuple might arrive at the sensor’s TCP source at 10:00:00.456, get parsed and forwarded at 10:00:00.500, and reach a downstream operator at 10:00:00.600. Each is a different processing-time timestamp.</p>
+<p>A query like <code>SELECT AVG(speed) GROUP BY vehicle WINDOW TUMBLING(1 SECOND)</code> is ambiguous unless you say which clock the window applies to. NebulaStream defaults to event time when a field is named (<code>WINDOW TUMBLING(creationTS, SIZE 1 SEC)</code>) and ingestion time (the source’s processing-time stamp at ingest) when no field is named.</p>
+<p>Event-time windows are the interesting case. They are deterministic across replays — re-running the same input produces the same window contents — but they require watermarks to know when to fire. Processing-time windows are easy to fire (the local clock decides) but non-deterministic. Streaming engineers prefer event-time windows almost always <span class="citation" data-cites="streaming-systems">(<a href="../references.html#ref-streaming-systems" role="doc-biblioref">Akidau et al. 2018</a>)</span>; this is what we will focus on.</p>
+<hr>
+</section>
+<section id="sec-four-identifiers" class="level2" data-number="7.2">
+<h2 data-number="7.2" class="anchored" data-anchor-id="sec-four-identifiers"><span class="header-section-number">7.2</span> 7.2 The four progress identifiers</h2>
+<p>Every <code>TupleBuffer</code> in NebulaStream carries four identifiers that together determine its position in the engine’s progress lattice. They are defined in <code>nes-common/include/Identifiers/Identifiers.hpp</code>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb1-1"><a href="#cb1-1"></a><span class="co">// nes-common/include/Identifiers/Identifiers.hpp</span></span>
+<span id="cb1-2"><a href="#cb1-2"></a><span class="kw">using</span> OriginId <span class="op">=</span> NESStrongType<span class="op">&lt;</span><span class="dt">uint64_t</span><span class="op">,</span> <span class="kw">struct</span> OriginId_<span class="op">,</span> <span class="dv">0</span><span class="op">,</span> <span class="dv">1</span><span class="op">&gt;;</span></span>
+<span id="cb1-3"><a href="#cb1-3"></a><span class="kw">using</span> SequenceNumber <span class="op">=</span> NESStrongType<span class="op">&lt;</span><span class="dt">uint64_t</span><span class="op">,</span> <span class="kw">struct</span> SequenceNumber_<span class="op">,</span> <span class="dv">0</span><span class="op">,</span> <span class="dv">1</span><span class="op">&gt;;</span></span>
+<span id="cb1-4"><a href="#cb1-4"></a><span class="kw">using</span> ChunkNumber <span class="op">=</span> NESStrongType<span class="op">&lt;</span><span class="dt">uint64_t</span><span class="op">,</span> <span class="kw">struct</span> ChunkNumber_<span class="op">,</span></span>
+<span id="cb1-5"><a href="#cb1-5"></a>                                  SequenceNumber<span class="op">::</span>INVALID<span class="op">,</span></span>
+<span id="cb1-6"><a href="#cb1-6"></a>                                  SequenceNumber<span class="op">::</span>INITIAL<span class="op">&gt;;</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>(<code>Watermark</code> is a <code>uint64_t</code> carrying the event-time stamp.)</p>
+<p>Why four, not just one? Each addresses a different mode of failure:</p>
+<p><strong><code>OriginId</code>: which stream is this from?</strong> A query joining two streams has tuples from two origins; the engine needs to track their watermarks separately, then take the minimum to advance the join’s notion of progress. A <code>WindowedAggregation</code> produces a <em>new</em> origin for its output. Without distinct origin identifiers, the engine cannot reason about per-source progress.</p>
+<p><strong><code>SequenceNumber</code>: which logical batch is this?</strong> A source produces an ordered sequence of logical events. The sequence number is strictly monotonic, per origin. It is the engine’s primary ordering key; gaps in the sequence indicate missing data.</p>
+<p><strong><code>ChunkNumber</code>: which physical buffer within the batch?</strong> A single logical event from a source may not fit in one buffer. A JSON record of 12 KiB exceeds the default 8 KiB buffer; it produces two physical buffers, both with the same <code>SequenceNumber</code> but different <code>ChunkNumber</code>s. The chunk number disambiguates them and records whether more chunks are coming.</p>
+<p><strong><code>Watermark</code>: how far has time advanced?</strong> The event-time stamp beyond which no earlier-event-time tuple is expected. Chunked correctly, this is the engine’s key for closing windows.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Example 7.1: a single buffer's progress 4-tuple">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Example 7.1: a single buffer’s progress 4-tuple
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>A buffer freshly emitted by a TCP source might carry:</p>
+<pre><code>OriginId       = 7        # the seventh logical source
+SequenceNumber = 152       # 152nd batch from this source
+ChunkNumber    = 0        # first (and only) chunk of this batch
+Watermark      = 1715000000000  # nanoseconds since epoch
+isLastChunk    = true     # no more chunks for this sequence</code></pre>
+<p>A window operator reading this buffer learns: from origin 7, the 152nd batch has arrived in full, with no event-time stamp earlier than 1715000000000 expected from this source.</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-watermark-advance" class="level2" data-number="7.3">
+<h2 data-number="7.3" class="anchored" data-anchor-id="sec-watermark-advance"><span class="header-section-number">7.3</span> 7.3 Watermark advancement</h2>
+<p>A source emits a watermark per buffer. The watermark is a promise about all <em>future</em> buffers from that source: “I will not produce a tuple with event time less than this watermark.” Once promised, the source is bound to honour it.</p>
+<p>Sources use one of two strategies:</p>
+<ul>
+<li><strong>Punctuated watermarks.</strong> The watermark is set to the maximum event time seen so far minus a slack <code>δ</code>. The slack accommodates out-of-order tuples within a single source.</li>
+<li><strong>Periodic watermarks.</strong> The watermark is recomputed every <em>N</em> buffers or every fixed interval, with the promise being made for the period as a whole.</li>
+</ul>
+<p>NebulaStream’s source implementations use both, configured per source type. The CSV file source, replaying historical data, uses the maximum-seen-event-time strategy because there is no real-world out-of-order; the file is what it is. A TCP source consuming a live feed uses a periodic strategy with a configurable slack.</p>
+<p>When a buffer with watermark <code>W</code> arrives at an operator, the operator advances its local notion of “watermark for origin O” to <code>max(current, W)</code>. For operators with multiple inputs (joins, unions), the <em>output</em> watermark is the <em>minimum</em> across origins. This minimum-advance is the engine’s analogue of two-phase commit for time: you cannot advance past origin O until O is willing to advance with you.</p>
+<p>The component that implements this is <code>MultiOriginWatermarkProcessor</code>, defined in <code>nes-physical-operators/</code>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb3-1"><a href="#cb3-1"></a><span class="co">// nes-physical-operators/src/Watermark/MultiOriginWatermarkProcessor.cpp (sketch)</span></span>
+<span id="cb3-2"><a href="#cb3-2"></a>Timestamp MultiOriginWatermarkProcessor<span class="op">::</span>updateWatermark<span class="op">(</span></span>
+<span id="cb3-3"><a href="#cb3-3"></a>    Timestamp ts<span class="op">,</span> SequenceData sequenceData<span class="op">,</span> OriginId origin<span class="op">)</span> <span class="at">const</span></span>
+<span id="cb3-4"><a href="#cb3-4"></a><span class="op">{</span></span>
+<span id="cb3-5"><a href="#cb3-5"></a>    <span class="cf">for</span> <span class="op">(</span><span class="dt">size_t</span> originIndex <span class="op">=</span> <span class="dv">0</span><span class="op">;</span> originIndex <span class="op">&lt;</span> origins<span class="op">.</span>size<span class="op">();</span> <span class="op">++</span>originIndex<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb3-6"><a href="#cb3-6"></a>        <span class="cf">if</span> <span class="op">(</span>origins<span class="op">[</span>originIndex<span class="op">]</span> <span class="op">==</span> origin<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb3-7"><a href="#cb3-7"></a>            watermarkProcessors<span class="op">[</span>originIndex<span class="op">]-&gt;</span>emplace<span class="op">(</span>sequenceData<span class="op">,</span> ts<span class="op">.</span>getRawValue<span class="op">());</span></span>
+<span id="cb3-8"><a href="#cb3-8"></a>        <span class="op">}</span></span>
+<span id="cb3-9"><a href="#cb3-9"></a>    <span class="op">}</span></span>
+<span id="cb3-10"><a href="#cb3-10"></a>    <span class="cf">return</span> getCurrentWatermark<span class="op">();</span>  <span class="co">// returns min across all origins</span></span>
+<span id="cb3-11"><a href="#cb3-11"></a><span class="op">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Each origin has its own <code>NonBlockingMonotonicSeqQueue</code> — NebulaStream’s lock-free ordered-queue primitive — that maintains the contiguous-prefix invariant we discussed in <a href="#sec-seq-windows" class="quarto-xref"><span>Section 7.4</span></a>. A <code>getCurrentWatermark()</code> call walks the queues, takes each origin’s contiguous-prefix watermark, and returns the minimum. This is the engine’s distributed-friendly progress lattice in 30 lines of code.</p>
+<hr>
+</section>
+<section id="sec-seq-windows" class="level2" data-number="7.4">
+<h2 data-number="7.4" class="anchored" data-anchor-id="sec-seq-windows"><span class="header-section-number">7.4</span> 7.4 Why sequence numbers matter for windows</h2>
+<p>Watermarks alone are not enough to close a window correctly. The problem is that watermarks are a promise about the <em>future</em>, not the past. A window that should fire at watermark 1000 cannot fire just because some buffer arrived with watermark 1100; the engine needs to know that <em>all the buffers with event times below 1000 have arrived</em>.</p>
+<p>This is where sequence numbers carry their weight. Sources commit not only to a watermark but to a contiguous sequence of buffers. If the source has emitted buffers with sequence numbers 0, 1, 2, 4 (note: 3 is missing), the engine cannot close a window even if the watermark on buffer 4 says “everything before 1000 is here.” Buffer 3 has not yet arrived; until it does, the window is incomplete.</p>
+<p>The engine therefore tracks, per origin, the highest <em>contiguous</em> sequence number it has seen. Watermarks advance only as far as the contiguous prefix allows. A non-contiguous gap stalls progress. This is the engine’s principal correctness mechanism: it prefers to halt rather than fire a window with missing data.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Example 7.2: a missing sequence number">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Example 7.2: a missing sequence number
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Source emits buffers with sequence numbers 100, 101, 102, then 104. Watermarks 100, 200, 300, 500. The engine’s per-origin state is:</p>
+<pre><code>contiguousPrefix = 102   # 103 is missing
+maxSeenSequence  = 104
+maxSeenWatermark = 500
+effectiveWatermark = 300  # the watermark on contiguous prefix</code></pre>
+<p>A window that ends at event time 250 <em>can</em> fire (250 &lt; 300). A window that ends at event time 400 <em>cannot</em> — even though the maxSeenWatermark is 500, sequence 103 might carry a tuple with event time 350. The engine waits.</p>
+<p>When sequence 103 arrives (with watermark, say, 400), the contiguous prefix advances to 104, the effective watermark advances to 500, and the window ending at 400 fires.</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-chunks" class="level2" data-number="7.5">
+<h2 data-number="7.5" class="anchored" data-anchor-id="sec-chunks"><span class="header-section-number">7.5</span> 7.5 Chunks and the SequenceShredder</h2>
+<p>The chunk number handles a different problem: a single logical event whose physical encoding spans multiple buffers. A 30 KiB JSON record cannot fit in an 8 KiB buffer; it produces four buffers with the same <code>SequenceNumber</code> and <code>ChunkNumber</code>s 0, 1, 2, 3, the last one marked <code>isLastChunk = true</code>.</p>
+<p>The <code>SequenceShredder</code> (described at length in <code>nes-input-formatters/README.md</code>) is the component that resolves multi-chunk events. It accumulates chunks per sequence number and emits the assembled logical record only when all chunks have arrived and <code>isLastChunk</code> is set. It also drives a small piece of state that downstream operators need:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb5-1"><a href="#cb5-1"></a><span class="co">// from the watermarking design doc</span></span>
+<span id="cb5-2"><a href="#cb5-2"></a><span class="dt">bool</span> seenAllChunks<span class="op">(</span>OriginId origin<span class="op">,</span> SequenceNumber seq<span class="op">,</span></span>
+<span id="cb5-3"><a href="#cb5-3"></a>                   ChunkNumber chunk<span class="op">,</span> <span class="dt">bool</span> isLastChunk<span class="op">)</span></span>
+<span id="cb5-4"><a href="#cb5-4"></a><span class="op">{</span></span>
+<span id="cb5-5"><a href="#cb5-5"></a>    <span class="kw">auto</span><span class="op">&amp;</span> <span class="op">[</span>lastChunk<span class="op">,</span> numSeenChunks<span class="op">]</span></span>
+<span id="cb5-6"><a href="#cb5-6"></a>        <span class="op">=</span> getLastChunkNumberAndNumSeenChunks<span class="op">(</span>seq<span class="op">);</span></span>
+<span id="cb5-7"><a href="#cb5-7"></a>    <span class="cf">if</span> <span class="op">(</span>isLastChunk<span class="op">)</span> <span class="op">{</span> lastChunk <span class="op">=</span> chunk<span class="op">;</span> <span class="op">}</span></span>
+<span id="cb5-8"><a href="#cb5-8"></a>    <span class="op">++</span>numSeenChunks<span class="op">;</span></span>
+<span id="cb5-9"><a href="#cb5-9"></a>    <span class="cf">return</span> numSeenChunks <span class="op">==</span> lastChunk <span class="op">+</span> <span class="dv">1</span><span class="op">;</span></span>
+<span id="cb5-10"><a href="#cb5-10"></a><span class="op">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>This is the engine’s per-sequence completion check. A window operator that needs to know “have all chunks of sequence S arrived?” calls <code>seenAllChunks</code>. The function is a few lines of state per sequence number; in steady state, almost every sequence has a single chunk and the bookkeeping is cheap.</p>
+<hr>
+</section>
+<section id="sec-window-types" class="level2" data-number="7.6">
+<h2 data-number="7.6" class="anchored" data-anchor-id="sec-window-types"><span class="header-section-number">7.6</span> 7.6 Window types</h2>
+<p>NebulaStream’s window operators support three classical window shapes:</p>
+<p><strong>Tumbling.</strong> Fixed-size, non-overlapping. <code>WINDOW TUMBLING(ts, SIZE 1 SEC)</code> produces non-overlapping 1-second buckets. Each tuple belongs to exactly one window.</p>
+<p><strong>Sliding.</strong> Fixed-size, overlapping. <code>WINDOW SLIDING(ts, SIZE 5 SEC, ADVANCE 1 SEC)</code> produces overlapping 5-second windows that advance every 1 second. Each tuple belongs to up to five windows.</p>
+<p><strong>Session.</strong> Variable-size, gap-defined. A session window groups tuples whose timestamps are within <code>gap</code> of one another. Used for “all events from a single user’s browsing session.”</p>
+<p>The window-type hierarchy is in <code>nes-logical-operators/include/WindowTypes/Types/</code>. Each window type knows how to compute, for a given event-time stamp, the set of windows that contain that timestamp.</p>
+<hr>
+</section>
+<section id="sec-build-probe" class="level2" data-number="7.7">
+<h2 data-number="7.7" class="anchored" data-anchor-id="sec-build-probe"><span class="header-section-number">7.7</span> 7.7 The build/probe split</h2>
+<p>A windowed aggregation lowers, physically, into a <em>build</em> phase that accumulates state and a <em>probe</em> phase that emits results when windows close. The build phase is keyed on the grouping key plus the window identity; it maintains a hash map of partial results. The probe phase is triggered by watermark advancement: when the engine’s notion of progress crosses a window’s end timestamp, the probe walks the hash map and emits one tuple per window.</p>
+<p>The physical operators are in <code>nes-physical-operators/include/</code>: <code>WindowBuildPhysicalOperator</code> and <code>WindowProbePhysicalOperator</code>. A <code>WindowBasedOperatorHandler</code> (<code>nes-physical-operators/include/WindowBasedOperatorHandler.hpp</code>) coordinates the two: it owns the slice store, the watermark processors (one for build, one for probe), and the trigger logic.</p>
+<div class="callout callout-style-default callout-tip callout-titled" title="Real-system reference: how Flink does this">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Tip</span>Real-system reference: how Flink does this
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Flink uses a similar build/probe split, with watermarks driving window firing. The two important differences are:</p>
+<ol type="1">
+<li><p>Flink stores window state in RocksDB by default, not in memory. NebulaStream is in-memory only (Chapter 16). For workloads that exceed memory, NebulaStream relies on the operator developer to spill manually; Flink handles it transparently with state backends.</p></li>
+<li><p>Flink uses a single watermark per parallel operator instance, tracking progress through that instance’s view of the world. NebulaStream uses a per-origin watermark, allowing more precise reasoning about multi-source joins. The trade-off is bookkeeping complexity.</p></li>
+</ol>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-cross-worker-watermarks" class="level2" data-number="7.8">
+<h2 data-number="7.8" class="anchored" data-anchor-id="sec-cross-worker-watermarks"><span class="header-section-number">7.8</span> 7.8 Watermarks across workers</h2>
+<p>So far this chapter has described watermark propagation as if the whole query ran in one process. In a distributed deployment (Chapter 19), the operator graph spans workers, and watermarks have to cross the wire.</p>
+<p>The four-tuple progress identifiers we have been discussing — <code>OriginId</code>, <code>SequenceNumber</code>, <code>ChunkNumber</code>, <code>Watermark</code> — are exactly what makes this work cleanly. The information that matters at a network boundary is <em>what an upstream origin has promised</em>, not <em>which thread is processing what</em>. Promises travel as TupleBuffer metadata.</p>
+<p>When a <code>NetworkSink</code> (Chapter 19) ships a buffer over to a <code>NetworkSource</code> on another worker, the buffer’s metadata — including the four progress identifiers — travels with it. The receiving side does not invent new origin or sequence numbers; it forwards the originating ones. A downstream operator on the receiving worker sees the same <code>OriginId</code> it would have seen if the whole query were single-node. The engine’s notion of progress is consistent across the boundary.</p>
+<p>The implication: <strong>a join on worker B between an origin from worker A and a local origin behaves correctly</strong> because the <code>MultiOriginWatermarkProcessor</code> on worker B sees both origins’ watermarks — the local one directly, the remote one via the NetworkSource — and takes the minimum. The minimum-of-origins discipline that holds within one worker holds across many.</p>
+<p>What does <em>not</em> travel automatically is <em>trust</em>. If worker A is unreachable (network partition), the receiving side cannot distinguish “A is slow and will catch up” from “A has crashed and will never catch up.” The engine’s current behaviour is conservative: a watermark that has not advanced is held to be not-yet-advanced, and downstream windows wait. Chapter 22 discusses adaptive timeout policies as future work.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Example 7.4: a windowed aggregation across workers">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Example 7.4: a windowed aggregation across workers
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>A query reading from two sensors (sensor-A on worker A, sensor-B on worker B) and aggregating into one-second windows on worker C:</p>
+<pre><code>worker A: source(sensor-A) → NetworkSink(channel-1)
+                                            │
+worker B: source(sensor-B) → NetworkSink(channel-2)
+                                            │
+                                            ▼
+worker C: NetworkSource×2 → AggregationBuild → AggregationProbe → sink</code></pre>
+<p>Two <code>OriginId</code>s flow into worker C’s aggregation. The <code>MultiOriginWatermarkProcessor</code> on the build side sees both; the aggregation does not fire windows until <em>both</em> origins’ watermarks have crossed the window’s end. If worker A’s network briefly hiccups, worker C waits — windows from before the hiccup eventually fire when the buffers catch up; windows that depend on data that never arrives stall conservatively.</p>
+</div>
+</div>
+</section>
+<section id="sec-gc-state" class="level2" data-number="7.9">
+<h2 data-number="7.9" class="anchored" data-anchor-id="sec-gc-state"><span class="header-section-number">7.9</span> 7.9 Garbage collection: when state can be released</h2>
+<p>A window’s state — the partial aggregation hash map keyed on <code>(window-id, group-key)</code> — has to be released eventually, or the engine grows without bound.</p>
+<p>NebulaStream uses a <em>slice</em> abstraction: state is partitioned into slices keyed on a contiguous time range, and a slice can be released once the engine’s watermark has advanced past the slice’s end. The garbage collector (<code>garbageCollectSlicesAndWindows</code> on the <code>WindowBasedOperatorHandler</code>) walks slices on every probe pass and deallocates those that are guaranteed to never receive late tuples.</p>
+<p>The decision is conservative: a slice is released only when <em>all</em> upstream watermarks have passed it. Out-of-order tuples that arrive after release are dropped silently. NebulaStream does not, today, support late-data side outputs the way Flink does.</p>
+<hr>
+</section>
+<section id="sec-ch7-summary" class="level2" data-number="7.10">
+<h2 data-number="7.10" class="anchored" data-anchor-id="sec-ch7-summary"><span class="header-section-number">7.10</span> Summary</h2>
+<p>NebulaStream tracks progress with a four-tuple per <code>TupleBuffer</code>: <code>OriginId</code> distinguishes streams, <code>SequenceNumber</code> orders batches per origin, <code>ChunkNumber</code> distinguishes physical buffers belonging to the same logical batch, and <code>Watermark</code> carries the event-time promise. Watermarks advance through the operator graph by minimum-of-input, gated by the contiguous sequence-number prefix to ensure no missing batch is masked by a later watermark. Multi-chunk events are reassembled by the <code>SequenceShredder</code>. Window operators split into build and probe phases, with watermarks triggering probe and slice-based garbage collection releasing closed-window state. The mechanism is intricate but conservative: when in doubt, the engine waits.</p>
+<hr>
+</section>
+<section id="sec-ch7-exercises" class="level2" data-number="7.11">
+<h2 data-number="7.11" class="anchored" data-anchor-id="sec-ch7-exercises"><span class="header-section-number">7.11</span> Reading exercises</h2>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 7.1: trace a window firing">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 7.1: trace a window firing
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Run a windowed-aggregation systest in TRACE mode:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb7"><pre class="sourceCode numberSource shell number-lines code-with-copy"><code class="sourceCode"><span id="cb7-1"><a href="#cb7-1"></a>cmake-build-debug/systest/systest \</span>
+<span id="cb7-2"><a href="#cb7-2"></a>    -t nes-systests/windows/SlidingWindowsWithGap.test:1 \</span>
+<span id="cb7-3"><a href="#cb7-3"></a>    -- --logging.level=TRACE</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Identify the log lines that show watermark advancement, sequence-number gaps (if any), and window fires. How many windows fire over the test’s lifetime?</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 7.2: introduce out-of-order data">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 7.2: introduce out-of-order data
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Modify a tumbling-window test’s input to introduce out-of-order events (event times 1, 2, 3, 5, 4, 6, …). What happens? Where does the engine handle the out-of-order? Look at the source’s watermark generation strategy.</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 7.3: drop a sequence">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 7.3: drop a sequence
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>In a copy of an input file, remove the third record from a sliding-window test. Now sequence numbers are 1, 2, 4, 5, …. Watch what happens: the engine should stall (no windows fire) because the contiguous prefix never advances past 2. How does the engine recover? Hint: it does not, automatically. The user or framework has to provide a heartbeat or end-of-stream signal.</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 7.4: build a multi-source watermark">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 7.4: build a multi-source watermark
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Run a join systest:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb8"><pre class="sourceCode numberSource shell number-lines code-with-copy"><code class="sourceCode"><span id="cb8-1"><a href="#cb8-1"></a>cmake-build-debug/systest/systest \</span>
+<span id="cb8-2"><a href="#cb8-2"></a>    -t nes-systests/operator/join/JoinMultipleStreams.test:1 \</span>
+<span id="cb8-3"><a href="#cb8-3"></a>    -- --logging.level=TRACE</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>The join has two input origins. Trace the watermarks: when does the join’s output watermark advance? You should see the minimum-across-origins behaviour clearly.</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-ch7-refs" class="level2" data-number="7.12">
+<h2 data-number="7.12" class="anchored" data-anchor-id="sec-ch7-refs"><span class="header-section-number">7.12</span> References</h2>
+<ul>
+<li><em>Watermarking design.</em> <code>/Users/zeuchste/git/nebulastream/docs/technical/watermarking_progress_window_triggering.md</code>.</li>
+<li><em>Identifiers.</em> <code>nes-common/include/Identifiers/Identifiers.hpp</code>.</li>
+<li><em>Window types.</em> <code>nes-logical-operators/include/WindowTypes/Types/</code>.</li>
+<li><em>WindowBuild / Probe physical operators.</em> <code>nes-physical-operators/include/</code>.</li>
+<li><em>The Dataflow model.</em> T. Akidau et al., <em>The Dataflow Model: A Practical Approach to Balancing Correctness, Latency, and Cost in Massive-Scale, Unbounded, Out-of-Order Data Processing.</em> VLDB
+<ol start="2015" type="1">
+<li>The canonical reference for watermark-based stream processing.</li>
+</ol></li>
+<li><em>Streaming Systems.</em> Akidau, Chernyak, Lax. O’Reilly, 2018. Chapters 3 and 4 cover watermarks at length.</li>
+<li><em>MillWheel.</em> T. Akidau et al., <em>MillWheel: Fault-Tolerant Stream Processing at Internet Scale.</em> VLDB 2013.</li>
+</ul>
+
+
+<div id="refs" class="references csl-bib-body hanging-indent" role="list" style="display: none">
+<div id="ref-dataflow-paper" class="csl-entry" role="listitem">
+Akidau, Tyler, Robert Bradshaw, Craig Chambers, et al. 2015. <span>“The Dataflow Model: A Practical Approach to Balancing Correctness, Latency, and Cost in Massive-Scale, Unbounded, Out-of-Order Data Processing.”</span> <em>Proceedings of the <span>VLDB</span> Endowment</em> 8: 1792–803.
+</div>
+<div id="ref-streaming-systems" class="csl-entry" role="listitem">
+Akidau, Tyler, Slava Chernyak, and Reuven Lax. 2018. <em>Streaming Systems: The What, Where, When, and How of Large-Scale Data Processing</em>. O’Reilly Media.
+</div>
+</div>
+</section>
+
+</main> <!-- /main -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    // Ensure there is a toggle, if there isn't float one in the top right
+    if (window.document.querySelector('.quarto-color-scheme-toggle') === null) {
+      const a = window.document.createElement('a');
+      a.classList.add('top-right');
+      a.classList.add('quarto-color-scheme-toggle');
+      a.href = "";
+      a.onclick = function() { try { window.quartoToggleColorScheme(); } catch {} return false; };
+      const i = window.document.createElement("i");
+      i.classList.add('bi');
+      a.appendChild(i);
+      window.document.body.appendChild(a);
+    }
+    setColorSchemeToggle(hasAlternateSentinel())
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/nebula\.stream");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+            // target, if specified
+            link.setAttribute("target", "_blank");
+            if (link.getAttribute("rel") === null) {
+              link.setAttribute("rel", "noopener");
+            }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+<nav class="page-navigation">
+  <div class="nav-page nav-page-previous">
+      <a href="../chapters/06-logical-algebra.html" class="pagination-link" aria-label="Logical Operator Algebra">
+        <i class="bi bi-arrow-left-short"></i> <span class="nav-page-text"><span class="chapter-number">6</span>&nbsp; <span class="chapter-title">Logical Operator Algebra</span></span>
+      </a>          
+  </div>
+  <div class="nav-page nav-page-next">
+      <a href="../chapters/08-sources-sinks.html" class="pagination-link" aria-label="Sources, Sinks, and Input Formatters">
+        <span class="nav-page-text"><span class="chapter-number">8</span>&nbsp; <span class="chapter-title">Sources, Sinks, and Input Formatters</span></span> <i class="bi bi-arrow-right-short"></i>
+      </a>
+  </div>
+</nav>
+</div> <!-- /content -->
+<footer class="footer">
+  <div class="nav-footer">
+    <div class="nav-footer-left">
+<p>© CC BY-SA — code excerpts under Apache-2.0 from NebulaStream</p>
+</div>   
+    <div class="nav-footer-center">
+<p><a href="https://nebula.stream">nebula.stream</a> · <a href="https://github.com/nebulastream/nebulastream">github</a></p>
+<div class="toc-actions d-sm-block d-md-none"><ul><li><a href="https://github.com/nebulastream/nebulastream-book/edit/main/chapters/07-watermarks.qmd" class="toc-action"><i class="bi bi-github"></i>Edit this page</a></li><li><a href="https://github.com/nebulastream/nebulastream-book/issues/new" class="toc-action"><i class="bi empty"></i>Report an issue</a></li></ul></div></div>
+    <div class="nav-footer-right">
+<p>Built with <a href="https://quarto.org">Quarto</a></p>
+</div>
+  </div>
+</footer>
+
+
+
+
+<script src="../site_libs/quarto-html/zenscroll-min.js"></script>
+</body></html>

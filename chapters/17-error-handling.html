@@ -1,0 +1,1393 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.9.37">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>17&nbsp; Error Handling, Logging, and Observability – NebulaStream: A Stream Processing Engine from the Inside Out</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+/* CSS for citations */
+div.csl-bib-body { }
+div.csl-entry {
+  clear: both;
+}
+.hanging-indent div.csl-entry {
+  margin-left:2em;
+  text-indent:-2em;
+}
+div.csl-left-margin {
+  min-width:2em;
+  float:left;
+}
+div.csl-right-inline {
+  margin-left:2em;
+  padding-left:1em;
+}
+div.csl-indent {
+  margin-left: 2em;
+}</style>
+
+
+<script src="../site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="../site_libs/quarto-nav/headroom.min.js"></script>
+<script src="../site_libs/clipboard/clipboard.min.js"></script>
+<script src="../site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="../site_libs/quarto-search/fuse.min.js"></script>
+<script src="../site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="../">
+<link href="../chapters/18-frontends.html" rel="next">
+<link href="../chapters/16-stateful-operators.html" rel="prev">
+<link href="../figures/favicon.ico" rel="icon">
+<script src="../site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="../site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="../site_libs/quarto-html/popper.min.js"></script>
+<script src="../site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="../site_libs/quarto-html/anchor.min.js"></script>
+<link href="../site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-f5b116b226ab7871a339bcb27e385d4f.css" rel="stylesheet" class="quarto-color-scheme" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-dark-fa7fa037caeb5c295dcabee9de8bbbbc.css" rel="stylesheet" class="quarto-color-scheme quarto-color-alternate" id="quarto-text-highlighting-styles">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-f5b116b226ab7871a339bcb27e385d4f.css" rel="stylesheet" class="quarto-color-scheme-extra" id="quarto-text-highlighting-styles">
+<script src="../site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="../site_libs/bootstrap/bootstrap-59cd90b3a31d59781837685af5616a03.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-dark-7555ce834b751ef39c6101133797c128.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<link href="../site_libs/bootstrap/bootstrap-59cd90b3a31d59781837685af5616a03.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme-extra" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "location": "sidebar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "start",
+  "type": "textbox",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+<style>html{ scroll-behavior: smooth; }</style>
+
+
+</head>
+
+<body class="nav-sidebar docked quarto-light"><script id="quarto-html-before-body" type="application/javascript">
+    const toggleBodyColorMode = (bsSheetEl) => {
+      const mode = bsSheetEl.getAttribute("data-mode");
+      const bodyEl = window.document.querySelector("body");
+      if (mode === "dark") {
+        bodyEl.classList.add("quarto-dark");
+        bodyEl.classList.remove("quarto-light");
+      } else {
+        bodyEl.classList.add("quarto-light");
+        bodyEl.classList.remove("quarto-dark");
+      }
+    }
+    const toggleBodyColorPrimary = () => {
+      const bsSheetEl = window.document.querySelector("link#quarto-bootstrap:not([rel=disabled-stylesheet])");
+      if (bsSheetEl) {
+        toggleBodyColorMode(bsSheetEl);
+      }
+    }
+    const setColorSchemeToggle = (alternate) => {
+      const toggles = window.document.querySelectorAll('.quarto-color-scheme-toggle');
+      for (let i=0; i < toggles.length; i++) {
+        const toggle = toggles[i];
+        if (toggle) {
+          if (alternate) {
+            toggle.classList.add("alternate");
+          } else {
+            toggle.classList.remove("alternate");
+          }
+        }
+      }
+    };
+    const toggleColorMode = (alternate) => {
+      // Switch the stylesheets
+      const primaryStylesheets = window.document.querySelectorAll('link.quarto-color-scheme:not(.quarto-color-alternate)');
+      const alternateStylesheets = window.document.querySelectorAll('link.quarto-color-scheme.quarto-color-alternate');
+      manageTransitions('#quarto-margin-sidebar .nav-link', false);
+      if (alternate) {
+        // note: dark is layered on light, we don't disable primary!
+        enableStylesheet(alternateStylesheets);
+        for (const sheetNode of alternateStylesheets) {
+          if (sheetNode.id === "quarto-bootstrap") {
+            toggleBodyColorMode(sheetNode);
+          }
+        }
+      } else {
+        disableStylesheet(alternateStylesheets);
+        enableStylesheet(primaryStylesheets)
+        toggleBodyColorPrimary();
+      }
+      manageTransitions('#quarto-margin-sidebar .nav-link', true);
+      // Switch the toggles
+      setColorSchemeToggle(alternate)
+      // Hack to workaround the fact that safari doesn't
+      // properly recolor the scrollbar when toggling (#1455)
+      if (navigator.userAgent.indexOf('Safari') > 0 && navigator.userAgent.indexOf('Chrome') == -1) {
+        manageTransitions("body", false);
+        window.scrollTo(0, 1);
+        setTimeout(() => {
+          window.scrollTo(0, 0);
+          manageTransitions("body", true);
+        }, 40);
+      }
+    }
+    const disableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        stylesheet.rel = 'disabled-stylesheet';
+      }
+    }
+    const enableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        if(stylesheet.rel !== 'stylesheet') { // for Chrome, which will still FOUC without this check
+          stylesheet.rel = 'stylesheet';
+        }
+      }
+    }
+    const manageTransitions = (selector, allowTransitions) => {
+      const els = window.document.querySelectorAll(selector);
+      for (let i=0; i < els.length; i++) {
+        const el = els[i];
+        if (allowTransitions) {
+          el.classList.remove('notransition');
+        } else {
+          el.classList.add('notransition');
+        }
+      }
+    }
+    const isFileUrl = () => {
+      return window.location.protocol === 'file:';
+    }
+    const hasAlternateSentinel = () => {
+      let styleSentinel = getColorSchemeSentinel();
+      if (styleSentinel !== null) {
+        return styleSentinel === "alternate";
+      } else {
+        return false;
+      }
+    }
+    const setStyleSentinel = (alternate) => {
+      const value = alternate ? "alternate" : "default";
+      if (!isFileUrl()) {
+        window.localStorage.setItem("quarto-color-scheme", value);
+      } else {
+        localAlternateSentinel = value;
+      }
+    }
+    const getColorSchemeSentinel = () => {
+      if (!isFileUrl()) {
+        const storageValue = window.localStorage.getItem("quarto-color-scheme");
+        return storageValue != null ? storageValue : localAlternateSentinel;
+      } else {
+        return localAlternateSentinel;
+      }
+    }
+    const toggleGiscusIfUsed = (isAlternate, darkModeDefault) => {
+      const baseTheme = document.querySelector('#giscus-base-theme')?.value ?? 'light';
+      const alternateTheme = document.querySelector('#giscus-alt-theme')?.value ?? 'dark';
+      let newTheme = '';
+      if(authorPrefersDark) {
+        newTheme = isAlternate ? baseTheme : alternateTheme;
+      } else {
+        newTheme = isAlternate ? alternateTheme : baseTheme;
+      }
+      const changeGiscusTheme = () => {
+        // From: https://github.com/giscus/giscus/issues/336
+        const sendMessage = (message) => {
+          const iframe = document.querySelector('iframe.giscus-frame');
+          if (!iframe) return;
+          iframe.contentWindow.postMessage({ giscus: message }, 'https://giscus.app');
+        }
+        sendMessage({
+          setConfig: {
+            theme: newTheme
+          }
+        });
+      }
+      const isGiscussLoaded = window.document.querySelector('iframe.giscus-frame') !== null;
+      if (isGiscussLoaded) {
+        changeGiscusTheme();
+      }
+    };
+    const authorPrefersDark = false;
+    const darkModeDefault = authorPrefersDark;
+      document.querySelector('link#quarto-text-highlighting-styles.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+      document.querySelector('link#quarto-bootstrap.quarto-color-scheme-extra').rel = 'disabled-stylesheet';
+    let localAlternateSentinel = darkModeDefault ? 'alternate' : 'default';
+    // Dark / light mode switch
+    window.quartoToggleColorScheme = () => {
+      // Read the current dark / light value
+      let toAlternate = !hasAlternateSentinel();
+      toggleColorMode(toAlternate);
+      setStyleSentinel(toAlternate);
+      toggleGiscusIfUsed(toAlternate, darkModeDefault);
+      window.dispatchEvent(new Event('resize'));
+    };
+    // Switch to dark mode if need be
+    if (hasAlternateSentinel()) {
+      toggleColorMode(true);
+    } else {
+      toggleColorMode(false);
+    }
+  </script>
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top">
+  <nav class="quarto-secondary-nav">
+    <div class="container-fluid d-flex">
+      <button type="button" class="quarto-btn-toggle btn" data-bs-toggle="collapse" role="button" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+        <i class="bi bi-layout-text-sidebar-reverse"></i>
+      </button>
+        <nav class="quarto-page-breadcrumbs" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../chapters/14-task-execution.html">Runtime and Execution</a></li><li class="breadcrumb-item"><a href="../chapters/17-error-handling.html"><span class="chapter-number">17</span>&nbsp; <span class="chapter-title">Error Handling, Logging, and Observability</span></a></li></ol></nav>
+        <a class="flex-grow-1" role="navigation" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">      
+        </a>
+      <button type="button" class="btn quarto-search-button" aria-label="Search" onclick="window.quartoOpenSearch();">
+        <i class="bi bi-search"></i>
+      </button>
+    </div>
+  </nav>
+</header>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article">
+<!-- sidebar -->
+  <nav id="quarto-sidebar" class="sidebar collapse collapse-horizontal quarto-sidebar-collapse-item sidebar-navigation docked overflow-auto">
+    <div class="pt-lg-2 mt-2 text-left sidebar-header sidebar-header-stacked">
+      <a href="../index.html" class="sidebar-logo-link">
+      <img src="../figures/neslogo.png" alt="" class="sidebar-logo light-content py-0 d-lg-inline d-none">
+      <img src="../figures/neslogo.png" alt="" class="sidebar-logo dark-content py-0 d-lg-inline d-none">
+      </a>
+    <div class="sidebar-title mb-0 py-0">
+      <a href="../">NebulaStream Internals</a> 
+        <div class="sidebar-tools-main tools-wide">
+    <a href="https://github.com/nebulastream/nebulastream-book" title="Source Code" class="quarto-navigation-tool px-1" aria-label="Source Code"><i class="bi bi-github"></i></a>
+  <a href="" class="quarto-color-scheme-toggle quarto-navigation-tool  px-1" onclick="window.quartoToggleColorScheme(); return false;" title="Toggle dark mode"><i class="bi"></i></a>
+  <a href="" class="quarto-reader-toggle quarto-navigation-tool px-1" onclick="window.quartoToggleReader(); return false;" title="Toggle reader mode">
+  <div class="quarto-reader-toggle-btn">
+  <i class="bi"></i>
+  </div>
+</a>
+</div>
+    </div>
+      </div>
+        <div class="mt-2 flex-shrink-0 align-items-center">
+        <div class="sidebar-search">
+        <div id="quarto-search" class="" title="Search"></div>
+        </div>
+        </div>
+    <div class="sidebar-menu-container"> 
+    <ul class="list-unstyled mt-1">
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../index.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Preface</span></a>
+  </div>
+</li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-1" role="navigation" aria-expanded="true">
+ <span class="menu-text">Foundations</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-1" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-1" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/01-why-streaming.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">1</span>&nbsp; <span class="chapter-title">Why Stream Processing? Why Another Engine?</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/02-system-tour.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">2</span>&nbsp; <span class="chapter-title">System Tour: From SQL to Native Code</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/03-data-model.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">3</span>&nbsp; <span class="chapter-title">Data Model and Type System</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/04-buffer-management.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">4</span>&nbsp; <span class="chapter-title">Buffer Management and Memory Layout</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-2" role="navigation" aria-expanded="true">
+ <span class="menu-text">The Query Frontier</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-2" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-2" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/05-query-language.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">5</span>&nbsp; <span class="chapter-title">The Query Language and Parser</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/06-logical-algebra.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">6</span>&nbsp; <span class="chapter-title">Logical Operator Algebra</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/07-watermarks.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">7</span>&nbsp; <span class="chapter-title">Time, Watermarks, and Progress</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/08-sources-sinks.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">8</span>&nbsp; <span class="chapter-title">Sources, Sinks, and Input Formatters</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-3" role="navigation" aria-expanded="true">
+ <span class="menu-text">Optimization and Compilation</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-3" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-3" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/09-rule-based-optimization.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">9</span>&nbsp; <span class="chapter-title">Rule-Based Logical Optimization</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/10-physical-lowering.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">10</span>&nbsp; <span class="chapter-title">Physical Lowering and Operator Choice</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/11-pipelining.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">11</span>&nbsp; <span class="chapter-title">Pipelining and Compiled Plans</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/12-nautilus-codegen.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">12</span>&nbsp; <span class="chapter-title">JIT Code Generation with Nautilus and MLIR</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/13-plugins.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">13</span>&nbsp; <span class="chapter-title">Plugin Registries and Extensibility</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-4" role="navigation" aria-expanded="true">
+ <span class="menu-text">Runtime and Execution</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-4" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-4" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/14-task-execution.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">14</span>&nbsp; <span class="chapter-title">Task-Based Execution Model</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/15-two-queue-scheduler.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">15</span>&nbsp; <span class="chapter-title">The Two-Queue Scheduler and Deadlock Avoidance</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/16-stateful-operators.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">16</span>&nbsp; <span class="chapter-title">Stateful Operators and State Management</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/17-error-handling.html" class="sidebar-item-text sidebar-link active">
+ <span class="menu-text"><span class="chapter-number">17</span>&nbsp; <span class="chapter-title">Error Handling, Logging, and Observability</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/18-frontends.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">18</span>&nbsp; <span class="chapter-title">The Worker Process and Client Frontends</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-5" role="navigation" aria-expanded="true">
+ <span class="menu-text">Operations and Frontiers</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-5" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-5" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/19-distributed-deployment.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">19</span>&nbsp; <span class="chapter-title">Distributed Deployment: Cloud, Fog, Edge</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/20-testing.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">20</span>&nbsp; <span class="chapter-title">Testing: Unit, Integration, and Systests</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/21-benchmarking.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">21</span>&nbsp; <span class="chapter-title">Benchmarking and Performance Engineering</span></span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../chapters/22-open-problems.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text"><span class="chapter-number">22</span>&nbsp; <span class="chapter-title">Where to Next: Open Problems</span></span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../references.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">References</span></a>
+  </div>
+</li>
+        <li class="sidebar-item sidebar-item-section">
+      <div class="sidebar-item-container"> 
+            <a class="sidebar-item-text sidebar-link text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-6" role="navigation" aria-expanded="true">
+ <span class="menu-text">Appendices</span></a>
+          <a class="sidebar-item-toggle text-start" data-bs-toggle="collapse" data-bs-target="#quarto-sidebar-section-6" role="navigation" aria-expanded="true" aria-label="Toggle section">
+            <i class="bi bi-chevron-right ms-2"></i>
+          </a> 
+      </div>
+      <ul id="quarto-sidebar-section-6" class="collapse list-unstyled sidebar-section depth1 show">  
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/A-build.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Building NebulaStream</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/B-conventions.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Coding Conventions</span></a>
+  </div>
+</li>
+          <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="../appendices/C-glossary.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">Glossary</span></a>
+  </div>
+</li>
+      </ul>
+  </li>
+    </ul>
+    </div>
+</nav>
+<div id="quarto-sidebar-glass" class="quarto-sidebar-collapse-item" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item"></div>
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">Table of contents</h2>
+   
+  <ul>
+  <li><a href="#sec-bugs-vs-errors" id="toc-sec-bugs-vs-errors" class="nav-link active" data-scroll-target="#sec-bugs-vs-errors"><span class="header-section-number">17.1</span> 17.1 Bugs vs.&nbsp;errors</a></li>
+  <li><a href="#sec-exception-list" id="toc-sec-exception-list" class="nav-link" data-scroll-target="#sec-exception-list"><span class="header-section-number">17.2</span> 17.2 The exception list: one file, eighty types</a></li>
+  <li><a href="#sec-invariant-macros" id="toc-sec-invariant-macros" class="nav-link" data-scroll-target="#sec-invariant-macros"><span class="header-section-number">17.3</span> 17.3 INVARIANT and PRECONDITION</a></li>
+  <li><a href="#sec-logging" id="toc-sec-logging" class="nav-link" data-scroll-target="#sec-logging"><span class="header-section-number">17.4</span> 17.4 Logging through spdlog</a></li>
+  <li><a href="#sec-expected-pattern" id="toc-sec-expected-pattern" class="nav-link" data-scroll-target="#sec-expected-pattern"><span class="header-section-number">17.5</span> 17.5 Recoverable errors: the std::expected pattern</a></li>
+  <li><a href="#sec-distributed-failures" id="toc-sec-distributed-failures" class="nav-link" data-scroll-target="#sec-distributed-failures"><span class="header-section-number">17.6</span> 17.6 Distributed failure modes</a></li>
+  <li><a href="#sec-observability" id="toc-sec-observability" class="nav-link" data-scroll-target="#sec-observability"><span class="header-section-number">17.7</span> 17.7 Observability: where to look when something is wrong</a></li>
+  <li><a href="#sec-ch17-summary" id="toc-sec-ch17-summary" class="nav-link" data-scroll-target="#sec-ch17-summary"><span class="header-section-number">17.8</span> Summary</a></li>
+  <li><a href="#sec-ch17-exercises" id="toc-sec-ch17-exercises" class="nav-link" data-scroll-target="#sec-ch17-exercises"><span class="header-section-number">17.9</span> Reading exercises</a></li>
+  <li><a href="#sec-ch17-refs" id="toc-sec-ch17-refs" class="nav-link" data-scroll-target="#sec-ch17-refs"><span class="header-section-number">17.10</span> References</a></li>
+  </ul>
+<div class="toc-actions"><ul><li><a href="https://github.com/nebulastream/nebulastream-book/edit/main/chapters/17-error-handling.qmd" class="toc-action"><i class="bi bi-github"></i>Edit this page</a></li><li><a href="https://github.com/nebulastream/nebulastream-book/issues/new" class="toc-action"><i class="bi empty"></i>Report an issue</a></li></ul></div></nav>
+    </div>
+<!-- main -->
+<main class="content" id="quarto-document-content">
+
+
+<header id="title-block-header" class="quarto-title-block default"><nav class="quarto-page-breadcrumbs quarto-title-breadcrumbs d-none d-lg-block" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="../chapters/14-task-execution.html">Runtime and Execution</a></li><li class="breadcrumb-item"><a href="../chapters/17-error-handling.html"><span class="chapter-number">17</span>&nbsp; <span class="chapter-title">Error Handling, Logging, and Observability</span></a></li></ol></nav>
+<div class="quarto-title">
+<h1 class="title"><span id="sec-error-handling" class="quarto-section-identifier"><span class="chapter-number">17</span>&nbsp; <span class="chapter-title">Error Handling, Logging, and Observability</span></span></h1>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<div class="callout callout-style-default callout-note callout-empty-content callout-titled" title="Status: complete first draft">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Status: complete first draft
+</div>
+</div>
+<div class="callout-body-container callout-body">
+
+</div>
+</div>
+<p>A streaming engine cannot fail silently. A query that produces wrong answers is worse than a query that crashes. NebulaStream treats error handling as a first-class concern: there is a written design document for it (<code>docs/design/20240711_error_handling.md</code>), a centralised exception list, two assertion macros for invariants, and a discipline of distinguishing recoverable errors from bugs.</p>
+<p>This chapter walks through the discipline.</p>
+<hr>
+<section id="sec-bugs-vs-errors" class="level2" data-number="17.1">
+<h2 data-number="17.1" class="anchored" data-anchor-id="sec-bugs-vs-errors"><span class="header-section-number">17.1</span> 17.1 Bugs vs.&nbsp;errors</h2>
+<p>The first useful distinction is also the bluntest: some failures are bugs (the code is wrong) and some are errors (the world is wrong). They warrant different handling.</p>
+<p>A <strong>bug</strong> is a violation of an invariant the code maintains. The worker dequeued a task whose pipeline weak_ptr was supposed to be non-null but is null. The hash map’s <code>getNumberOfTuples</code> returned a value larger than its capacity. These are facts about the code’s internal consistency that, if violated, mean the code has a defect the user cannot work around. The right response is to fail loudly and crash; continuing is dangerous.</p>
+<p>An <strong>error</strong> is an external condition the code anticipated. The file source was given a path that does not exist. A field in the input failed to parse as <code>UINT64</code>. The TCP source’s connection dropped mid-stream. These are facts about the world the engine has no control over. The right response is to handle them — either recover, or report a clean error to the user.</p>
+<p>NebulaStream uses different mechanisms for the two:</p>
+<ul>
+<li><strong>Bugs</strong>: <code>INVARIANT</code> and <code>PRECONDITION</code> macros. Crash on violation.</li>
+<li><strong>Errors</strong>: typed exceptions. Throw on unrecoverable failure; return <code>std::expected&lt;T, Exception&gt;</code> or <code>std::optional&lt;T&gt;</code> for expected-but-unsuccessful outcomes.</li>
+</ul>
+<p>We will see each.</p>
+<hr>
+</section>
+<section id="sec-exception-list" class="level2" data-number="17.2">
+<h2 data-number="17.2" class="anchored" data-anchor-id="sec-exception-list"><span class="header-section-number">17.2</span> 17.2 The exception list: one file, eighty types</h2>
+<p>NebulaStream has a single file that defines every exception type it can throw. The file is <code>nes-common/include/ExceptionDefinitions.inc</code>. Each entry uses an <code>EXCEPTION</code> macro:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb1-1"><a href="#cb1-1"></a><span class="co">// nes-common/include/ExceptionDefinitions.inc (sketch)</span></span>
+<span id="cb1-2"><a href="#cb1-2"></a>EXCEPTION<span class="op">(</span>InvalidConfigParameter<span class="op">,</span> <span class="dv">1000</span><span class="op">,</span> <span class="st">"Invalid configuration parameter"</span><span class="op">)</span></span>
+<span id="cb1-3"><a href="#cb1-3"></a>EXCEPTION<span class="op">(</span>CannotLoadConfig<span class="op">,</span> <span class="dv">1001</span><span class="op">,</span> <span class="st">"Cannot load configuration file"</span><span class="op">)</span></span>
+<span id="cb1-4"><a href="#cb1-4"></a><span class="co">// ... ~80 more entries ...</span></span>
+<span id="cb1-5"><a href="#cb1-5"></a>EXCEPTION<span class="op">(</span>InvalidQuerySyntax<span class="op">,</span> <span class="dv">2000</span><span class="op">,</span> <span class="st">"Invalid query syntax"</span><span class="op">)</span></span>
+<span id="cb1-6"><a href="#cb1-6"></a>EXCEPTION<span class="op">(</span>UnknownSourceType<span class="op">,</span> <span class="dv">2017</span><span class="op">,</span> <span class="st">"Unknown source type"</span><span class="op">)</span></span>
+<span id="cb1-7"><a href="#cb1-7"></a>EXCEPTION<span class="op">(</span>QueryCompilerError<span class="op">,</span> <span class="dv">2032</span><span class="op">,</span> <span class="st">"Query compiler error"</span><span class="op">)</span></span>
+<span id="cb1-8"><a href="#cb1-8"></a>EXCEPTION<span class="op">(</span>BufferAllocationFailure<span class="op">,</span> <span class="dv">3000</span><span class="op">,</span> <span class="st">"Buffer allocation failed"</span><span class="op">)</span></span>
+<span id="cb1-9"><a href="#cb1-9"></a>EXCEPTION<span class="op">(</span>QueryNotRegistered<span class="op">,</span> <span class="dv">3001</span><span class="op">,</span> <span class="st">"Query not registered"</span><span class="op">)</span></span>
+<span id="cb1-10"><a href="#cb1-10"></a>EXCEPTION<span class="op">(</span>ArithmeticalError<span class="op">,</span> <span class="dv">3013</span><span class="op">,</span> <span class="st">"Arithmetic error"</span><span class="op">)</span></span>
+<span id="cb1-11"><a href="#cb1-11"></a>EXCEPTION<span class="op">(</span>CannotConnectToCoordinator<span class="op">,</span> <span class="dv">5000</span><span class="op">,</span> <span class="st">"Cannot connect to coordinator"</span><span class="op">)</span></span>
+<span id="cb1-12"><a href="#cb1-12"></a>EXCEPTION<span class="op">(</span>InternalErrorAssert<span class="op">,</span> <span class="dv">9000</span><span class="op">,</span> <span class="st">"Internal error - assertion violated"</span><span class="op">)</span></span>
+<span id="cb1-13"><a href="#cb1-13"></a>EXCEPTION<span class="op">(</span>FunctionNotImplemented<span class="op">,</span> <span class="dv">9001</span><span class="op">,</span> <span class="st">"Function not implemented"</span><span class="op">)</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>Three observations.</p>
+<p><strong>Centralisation.</strong> Every exception is in this file. New exception types are added here and only here. The CLAUDE.md guideline is explicit: “All exception types defined in a single file.” This is unusual — most C++ codebases scatter exception definitions across translation units — and it is unusually useful: you can grep one file to know everything that can go wrong.</p>
+<p><strong>Numeric codes by category.</strong> The four-digit codes group exceptions by error class. The verified taxonomy as of <code>origin/main</code> is:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 25%">
+<col style="width: 25%">
+<col style="width: 25%">
+<col style="width: 25%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Range</th>
+<th>Count</th>
+<th>Category</th>
+<th>Representative codes</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>1XXX</td>
+<td>5</td>
+<td>Configuration</td>
+<td>InvalidConfigParameter (1000), CannotLoadConfig (1001)</td>
+</tr>
+<tr class="even">
+<td>2XXX</td>
+<td>38</td>
+<td>Query parsing / compilation</td>
+<td>InvalidQuerySyntax (2000), QueryCompilerError (2032), InvalidOptimizerRuleset (2037)</td>
+</tr>
+<tr class="odd">
+<td><strong>23XX</strong></td>
+<td><strong>4</strong></td>
+<td><strong>Distributed</strong> (sub-block of 2XXX)</td>
+<td>PlacementFailure (2300), InvalidTopology (2301), UnknownWorker (2302), DistributedFailure (2303)</td>
+</tr>
+<tr class="even">
+<td>3XXX</td>
+<td>8</td>
+<td>Runtime</td>
+<td>BufferAllocationFailure (3000), ArithmeticalError (3013)</td>
+</tr>
+<tr class="odd">
+<td>4XXX</td>
+<td>5</td>
+<td>Sources / sinks</td>
+<td>CannotFormatSourceData (4000), CannotOpenSink (4004)</td>
+</tr>
+<tr class="even">
+<td>5XXX</td>
+<td>6</td>
+<td>API</td>
+<td>QueryNotFound (5000), QueryStatusFailed (5005)</td>
+</tr>
+<tr class="odd">
+<td>9XXX</td>
+<td>4</td>
+<td>Internal bugs</td>
+<td>FunctionNotImplemented (9000), InvalidDynamicCast (9002)</td>
+</tr>
+<tr class="even">
+<td>9999 / 10000</td>
+<td>2</td>
+<td>Special</td>
+<td>UnknownException, TestException</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Total: 70 exception types</strong>, all defined in one file. A user-visible error message includes the code; an operator seeing <code>error 4004: Cannot open sink</code> can distinguish “the output path is bad” from <code>error 2300: Placement failure</code> (“the ILP solver could not place this query”).</p>
+<p>The 23XX block is worth calling out separately. Distributed deployments (Chapter 19) introduce four error modes — the ILP fails, a topology cycle is detected, an unknown worker is referenced, or a worker-side failure propagates to the coordinator. They live as a sub-block of 2XXX rather than their own range because, conceptually, all four are “compilation/registration” failures: they happen before or during query startup, not during steady-state execution. The 5XXX network range covers in-flight network errors.</p>
+<p><strong>Structured construction.</strong> The <code>EXCEPTION</code> macro generates a constructor that supports <code>fmt::format</code>-style formatting:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb2-1"><a href="#cb2-1"></a><span class="co">// (Sketch of what EXCEPTION expands to)</span></span>
+<span id="cb2-2"><a href="#cb2-2"></a><span class="kw">inline</span> Exception InvalidConfigParameter<span class="op">()</span> <span class="op">{</span></span>
+<span id="cb2-3"><a href="#cb2-3"></a>    <span class="cf">return</span> Exception<span class="op">(</span><span class="st">"Invalid configuration parameter"</span><span class="op">,</span> <span class="dv">1000</span><span class="op">);</span></span>
+<span id="cb2-4"><a href="#cb2-4"></a><span class="op">}</span></span>
+<span id="cb2-5"><a href="#cb2-5"></a><span class="kw">inline</span> Exception InvalidConfigParameter<span class="op">(</span><span class="bu">std::</span>string msg<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb2-6"><a href="#cb2-6"></a>    <span class="cf">return</span> Exception<span class="op">(</span>fmt<span class="op">::</span>format<span class="op">(</span><span class="st">"Invalid configuration parameter; </span><span class="sc">{}\n</span><span class="st">"</span><span class="op">,</span> msg<span class="op">),</span> <span class="dv">1000</span><span class="op">);</span></span>
+<span id="cb2-7"><a href="#cb2-7"></a><span class="op">}</span></span>
+<span id="cb2-8"><a href="#cb2-8"></a><span class="kw">template</span> <span class="op">&lt;</span><span class="kw">typename</span><span class="op">...</span> Args<span class="op">&gt;</span></span>
+<span id="cb2-9"><a href="#cb2-9"></a><span class="kw">inline</span> Exception InvalidConfigParameter<span class="op">(</span>fmt<span class="op">::</span>format_string<span class="op">&lt;</span>Args<span class="op">...&gt;</span> fmt_msg<span class="op">,</span> Args<span class="op">&amp;&amp;...</span> args<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb2-10"><a href="#cb2-10"></a>    <span class="cf">return</span> Exception<span class="op">(</span></span>
+<span id="cb2-11"><a href="#cb2-11"></a>        fmt<span class="op">::</span>format<span class="op">(</span><span class="st">"Invalid configuration parameter; </span><span class="sc">{}\n</span><span class="st">"</span><span class="op">,</span></span>
+<span id="cb2-12"><a href="#cb2-12"></a>                    fmt<span class="op">::</span>format<span class="op">(</span>fmt_msg<span class="op">,</span> <span class="bu">std::</span>forward<span class="op">&lt;</span>Args<span class="op">&gt;(</span>args<span class="op">)...)),</span></span>
+<span id="cb2-13"><a href="#cb2-13"></a>        <span class="dv">1000</span><span class="op">);</span></span>
+<span id="cb2-14"><a href="#cb2-14"></a><span class="op">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><code>throw InvalidConfigParameter("port {} is out of range", 99999)</code> produces a message that the caller can format and the user can read.</p>
+<hr>
+</section>
+<section id="sec-invariant-macros" class="level2" data-number="17.3">
+<h2 data-number="17.3" class="anchored" data-anchor-id="sec-invariant-macros"><span class="header-section-number">17.3</span> 17.3 INVARIANT and PRECONDITION</h2>
+<p>For bugs, NebulaStream uses two macros, both in <code>nes-common/include/ErrorHandling.hpp</code>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb3-1"><a href="#cb3-1"></a><span class="co">// nes-common/include/ErrorHandling.hpp</span></span>
+<span id="cb3-2"><a href="#cb3-2"></a><span class="pp">#define INVARIANT</span><span class="op">(</span>condition<span class="op">,</span><span class="pp"> </span>formatString<span class="op">,</span><span class="pp"> </span><span class="op">...)</span><span class="pp">                                </span><span class="op">\</span></span>
+<span id="cb3-3"><a href="#cb3-3"></a><span class="pp">    </span><span class="cf">do</span><span class="pp"> </span><span class="op">{</span><span class="pp">                                                                        </span><span class="op">\</span></span>
+<span id="cb3-4"><a href="#cb3-4"></a><span class="pp">        </span><span class="cf">if</span><span class="pp"> </span><span class="op">(!(</span>condition<span class="op">))</span><span class="pp"> </span><span class="op">{</span><span class="pp">                                                    </span><span class="op">\</span></span>
+<span id="cb3-5"><a href="#cb3-5"></a><span class="pp">            </span><span class="kw">auto</span><span class="pp"> </span>trace<span class="pp"> </span><span class="op">=</span><span class="pp"> </span>cpptrace<span class="op">::</span>generate_trace<span class="op">().</span>to_string<span class="op">(</span><span class="kw">true</span><span class="op">);</span><span class="pp">           </span><span class="op">\</span></span>
+<span id="cb3-6"><a href="#cb3-6"></a><span class="pp">            </span>NES_ERROR<span class="op">(</span><span class="st">"Invariant violated: (</span><span class="sc">{}</span><span class="st">): "</span><span class="pp"> </span>formatString<span class="pp"> </span><span class="st">"</span><span class="sc">\n\n{}</span><span class="st">"</span><span class="op">,</span><span class="pp">      </span><span class="op">\</span></span>
+<span id="cb3-7"><a href="#cb3-7"></a><span class="pp">                      </span><span class="op">#</span>condition<span class="pp"> </span><span class="ot">__VA_OPT__</span><span class="op">(,</span><span class="pp"> </span><span class="op">)</span><span class="pp"> </span><span class="ot">__VA_ARGS__</span><span class="op">,</span><span class="pp"> </span>trace<span class="op">);</span><span class="pp">           </span><span class="op">\</span></span>
+<span id="cb3-8"><a href="#cb3-8"></a><span class="pp">            </span><span class="cf">if</span><span class="pp"> </span><span class="op">(</span><span class="kw">auto</span><span class="pp"> </span>logger<span class="pp"> </span><span class="op">=</span><span class="pp"> </span><span class="op">::</span>NES<span class="op">::</span>Logger<span class="op">::</span>getInstance<span class="op">())</span><span class="pp">                    </span><span class="op">\</span></span>
+<span id="cb3-9"><a href="#cb3-9"></a><span class="pp">                </span>logger<span class="op">-&gt;</span>shutdown<span class="op">();</span><span class="pp">                                            </span><span class="op">\</span></span>
+<span id="cb3-10"><a href="#cb3-10"></a><span class="pp">            </span><span class="bu">std::</span>terminate<span class="op">();</span><span class="pp">                                                  </span><span class="op">\</span></span>
+<span id="cb3-11"><a href="#cb3-11"></a><span class="pp">        </span><span class="op">}</span><span class="pp">                                                                      </span><span class="op">\</span></span>
+<span id="cb3-12"><a href="#cb3-12"></a><span class="pp">    </span><span class="op">}</span><span class="pp"> </span><span class="cf">while</span><span class="pp"> </span><span class="op">(</span><span class="kw">false</span><span class="op">)</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><code>INVARIANT(condition, fmt, args…)</code> checks a condition that should be true if the engine’s logic is correct. On violation, it produces a stack trace via cpptrace, logs at ERROR level, flushes the logger, and terminates. There is no recovery path; the engine crashes.</p>
+<p><code>PRECONDITION</code> is the symmetric macro for function entry: a condition the caller is supposed to ensure. Same mechanics, same crash-on-violation behaviour.</p>
+<p>Both macros are compiled away in <code>Release</code> and <code>Benchmark</code> builds (via <code>#define NO_ASSERT</code>). In <code>Debug</code> and <code>RelWithDebInfo</code>, they fire. The reasoning is conventional: production should not pay the cost of internal-consistency checks; development should pay the cost generously.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Example 17.1: when INVARIANT fires">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Note</span>Example 17.1: when INVARIANT fires
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>A worker thread dequeues a <code>WorkTask</code> and locks its weak_ptr to a <code>RunningQueryPlanNode</code>. The lock fails (returns nullptr). The worker logs and drops the task — that is graceful, not a bug. But suppose the worker’s <em>own state</em> says it should have a non-null pointer at this point: the worker just locked a weak_ptr two lines up and stored the result, and now the result is nullptr. That would be:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb4-1"><a href="#cb4-1"></a>INVARIANT<span class="op">(</span>strongRef <span class="op">!=</span> <span class="kw">nullptr</span><span class="op">,</span></span>
+<span id="cb4-2"><a href="#cb4-2"></a>          <span class="st">"RunningQueryPlanNode disappeared mid-handler for query </span><span class="sc">{}</span><span class="st">"</span><span class="op">,</span></span>
+<span id="cb4-3"><a href="#cb4-3"></a>          task<span class="op">.</span>queryId<span class="op">);</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>If this fires, something has destroyed the node while a worker held a strong reference to it — which the engine’s lifecycle machinery should make impossible. The crash is correct: the alternative is undefined behaviour.</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-logging" class="level2" data-number="17.4">
+<h2 data-number="17.4" class="anchored" data-anchor-id="sec-logging"><span class="header-section-number">17.4</span> 17.4 Logging through spdlog</h2>
+<p>NebulaStream uses spdlog <span class="citation" data-cites="spdlog">(<a href="../references.html#ref-spdlog" role="doc-biblioref">Melman 2014--</a>)</span> as its logger. Configuration lives in <code>nes-single-node-worker/src/SingleNodeWorker.cpp</code> and the API is the standard <code>NES_TRACE</code>, <code>NES_DEBUG</code>, <code>NES_INFO</code>, <code>NES_WARN</code>, <code>NES_ERROR</code> macros. fmt-style formatting is the convention:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb5-1"><a href="#cb5-1"></a>NES_INFO<span class="op">(</span><span class="st">"Query </span><span class="sc">{}</span><span class="st"> registered with </span><span class="sc">{}</span><span class="st"> pipelines"</span><span class="op">,</span></span>
+<span id="cb5-2"><a href="#cb5-2"></a>         queryId<span class="op">,</span> plan<span class="op">.</span>getPipelines<span class="op">().</span>size<span class="op">());</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>The build-type-aware default log levels (from CLAUDE.md):</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Build type</th>
+<th>Default level</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Debug</td>
+<td>TRACE</td>
+</tr>
+<tr class="even">
+<td>RelWithDebInfo</td>
+<td>WARN</td>
+</tr>
+<tr class="odd">
+<td>Release</td>
+<td>ERROR</td>
+</tr>
+<tr class="even">
+<td>Benchmark</td>
+<td>(no logging)</td>
+</tr>
+</tbody>
+</table>
+<p>The benchmark build strips logging entirely at compile time — even an unreached <code>NES_TRACE</code> call is gone. This is the right choice for performance experiments where each remaining cycle matters; it is the wrong default for production debugging, which is why production typically uses Release rather than Benchmark.</p>
+<p>There is also a custom <strong>GoogleEventTracePrinter</strong> that, when enabled, writes Chrome-tracing-compatible JSON for the worker. You can drag the resulting trace into <code>chrome://tracing</code> and visualise the worker’s activity at sub-millisecond granularity. This is one of the engine’s better debugging aids and is a standard tool we will use throughout Chapter 21 (benchmarking).</p>
+<hr>
+</section>
+<section id="sec-expected-pattern" class="level2" data-number="17.5">
+<h2 data-number="17.5" class="anchored" data-anchor-id="sec-expected-pattern"><span class="header-section-number">17.5</span> 17.5 Recoverable errors: the std::expected pattern</h2>
+<p>Some errors are not exceptional in the “should never happen” sense — they are routine. The user submits a query that fails to parse. A source’s file path is wrong. The right response is not “throw and unwind”, it is “return the error to the caller.”</p>
+<p>NebulaStream uses <code>std::expected&lt;T, Exception&gt;</code> for these cases. The query-registration path returns one:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb6"><pre class="sourceCode numberSource cpp number-lines code-with-copy"><code class="sourceCode cpp"><span id="cb6-1"><a href="#cb6-1"></a><span class="co">// nes-single-node-worker/src/SingleNodeWorker.cpp (sketch)</span></span>
+<span id="cb6-2"><a href="#cb6-2"></a><span class="bu">std::</span>expected<span class="op">&lt;</span>QueryId<span class="op">,</span> Exception<span class="op">&gt;</span></span>
+<span id="cb6-3"><a href="#cb6-3"></a>SingleNodeWorker<span class="op">::</span>registerQuery<span class="op">(</span>LogicalPlan plan<span class="op">)</span> <span class="kw">noexcept</span></span>
+<span id="cb6-4"><a href="#cb6-4"></a><span class="op">{</span></span>
+<span id="cb6-5"><a href="#cb6-5"></a>    <span class="cf">if</span> <span class="op">(</span>plan<span class="op">.</span>getQueryId<span class="op">()</span> <span class="op">==</span> INVALID_QUERY_ID<span class="op">)</span> <span class="op">{</span></span>
+<span id="cb6-6"><a href="#cb6-6"></a>        <span class="bu">std::</span>uniform_int_distribution<span class="op">&lt;</span><span class="dt">size_t</span><span class="op">&gt;</span> dist<span class="op">(</span></span>
+<span id="cb6-7"><a href="#cb6-7"></a>            QueryId<span class="op">::</span>INITIAL<span class="op">,</span></span>
+<span id="cb6-8"><a href="#cb6-8"></a>            <span class="bu">std::</span>numeric_limits<span class="op">&lt;</span><span class="dt">int32_t</span><span class="op">&gt;::</span>max<span class="op">());</span></span>
+<span id="cb6-9"><a href="#cb6-9"></a>        plan<span class="op">.</span>setQueryId<span class="op">(</span>QueryId<span class="op">(</span>dist<span class="op">(*</span>idGenerator<span class="op">.</span>wlock<span class="op">())));</span></span>
+<span id="cb6-10"><a href="#cb6-10"></a>    <span class="op">}</span></span>
+<span id="cb6-11"><a href="#cb6-11"></a>    <span class="kw">auto</span> request <span class="op">=</span> <span class="bu">std::</span>make_unique<span class="op">&lt;</span>QueryCompilation<span class="op">::</span>QueryCompilationRequest<span class="op">&gt;(</span>plan<span class="op">);</span></span>
+<span id="cb6-12"><a href="#cb6-12"></a>    <span class="kw">auto</span> result <span class="op">=</span> compiler<span class="op">-&gt;</span>compileQuery<span class="op">(</span><span class="bu">std::</span>move<span class="op">(</span>request<span class="op">));</span></span>
+<span id="cb6-13"><a href="#cb6-13"></a>    <span class="co">// returns std::expected&lt;QueryId, Exception&gt;</span></span>
+<span id="cb6-14"><a href="#cb6-14"></a><span class="op">}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>The function is <code>noexcept</code> and returns either a <code>QueryId</code> (success) or an <code>Exception</code> (a typed error from the exception list). The caller decides how to respond — typically by translating the exception into a gRPC status code for the client.</p>
+<p>This pattern keeps the <em>normal</em> flow visible — the function signature reads “either I return a QueryId or I report an error” — while keeping bugs (which use exceptions or terminate) clearly distinct.</p>
+<hr>
+</section>
+<section id="sec-distributed-failures" class="level2" data-number="17.6">
+<h2 data-number="17.6" class="anchored" data-anchor-id="sec-distributed-failures"><span class="header-section-number">17.6</span> 17.6 Distributed failure modes</h2>
+<p>The four 23XX exception types we catalogued in <a href="#sec-exception-list" class="quarto-xref"><span>Section 17.2</span></a> cover specific failure shapes the distributed layer can produce.</p>
+<p><strong><code>PlacementFailure</code> (2300).</strong> The ILP solver returned no feasible solution. Causes: a sink was declared on a worker that has no path to the source’s worker; a query asks for more capacity than any single worker can provide; the user declared sources and sinks that the topology cannot connect. The exception travels back to the user as a registration error (the query never starts).</p>
+<p><strong><code>InvalidTopology</code> (2301).</strong> Adding a worker would create a cycle in the DAG. Thrown by <code>NetworkTopology::addNode</code> (Chapter 19). This is a structural violation, not a runtime failure; the offending registration is rejected and the catalog stays consistent.</p>
+<p><strong><code>UnknownWorker</code> (2302).</strong> The catalog was queried for a host that was never registered. Usually a programming error in the coordinator code; less commonly, a race between worker deregistration and a placement decision that referenced the worker. Either way, the engine cannot proceed safely — bare hosts have no associated <code>WorkerConfig</code>, so it is unsafe to guess.</p>
+<p><strong><code>DistributedFailure</code> (2303).</strong> The catch-all for worker-side errors that propagate up. A worker reports a runtime exception to the coordinator; the coordinator wraps it in a <code>DistributedFailure</code> carrying the original exception’s information. The user sees the coordinator’s wrapped error; the worker’s logs carry the original.</p>
+<p>What is <em>not</em> a 23XX exception: a transient network disruption. If a worker becomes unreachable mid-query, the coordinator’s <code>DistributedQueryStatusSnapshot</code> flips <code>hasConnectionException</code> and the global query status moves to <code>Unreachable</code> (Chapter 19). This is a state, not an exception — the engine does not throw on its own polling.</p>
+<p>The asymmetry between “failed loud” (an exception) and “fell silent” (<code>Unreachable</code>) is intentional. Loud failures are problems the engine has identified; silent ones are situations the engine cannot conclude about. Forcing the second into the first would lose information.</p>
+</section>
+<section id="sec-observability" class="level2" data-number="17.7">
+<h2 data-number="17.7" class="anchored" data-anchor-id="sec-observability"><span class="header-section-number">17.7</span> 17.7 Observability: where to look when something is wrong</h2>
+<p>Practical advice for the reader who has just hit an error in NebulaStream:</p>
+<ol type="1">
+<li><strong>Check the log first.</strong> The error code in the message lets you grep <code>nes-common/include/ExceptionDefinitions.inc</code> for the declaration; the surrounding text usually points at the code path that failed.</li>
+<li><strong>Run with <code>--logging.level=TRACE</code>.</strong> TRACE is generous; it logs every task, every pipeline transition, every state change. For non-trivial bugs the answer is somewhere in the trace.</li>
+<li><strong>Run in INTERPRETER mode.</strong> If the bug might be in the JIT, <code>--worker.default_query_execution.execution_mode=INTERPRETER</code> removes the entire compilation pipeline and runs the trace directly. If the bug disappears, the bug is in code generation.</li>
+<li><strong>Run with sanitizers.</strong> The CLAUDE.md notes the CI builds matrix includes ASan, UBSan, and TSan. For memory-corruption-shaped bugs, a sanitizer build localises the bug almost instantly.</li>
+<li><strong>Use the Chrome trace.</strong> Enable <code>GoogleEventTracePrinter</code> and drag the JSON into <code>chrome://tracing</code> for a visual timeline.</li>
+</ol>
+<p>The engine has invested visibly in observability. Most stream engines’ debug stories are worse.</p>
+<hr>
+</section>
+<section id="sec-ch17-summary" class="level2" data-number="17.8">
+<h2 data-number="17.8" class="anchored" data-anchor-id="sec-ch17-summary"><span class="header-section-number">17.8</span> Summary</h2>
+<p>NebulaStream distinguishes bugs (handled by <code>INVARIANT</code>/ <code>PRECONDITION</code> macros that crash on violation) from recoverable errors (handled by typed exceptions or <code>std::expected</code>). The exception list is centralised in a single <code>.inc</code> file with ~80 typed exceptions organised into numeric ranges by category. Logging is through spdlog with build-type-aware default levels, and an optional Chrome-tracing-compatible event printer for visualising worker activity. The discipline is to crash forcefully on bug-shaped failures and recover gracefully on world-shaped failures, with the line between the two made visible by the choice of mechanism.</p>
+<hr>
+</section>
+<section id="sec-ch17-exercises" class="level2" data-number="17.9">
+<h2 data-number="17.9" class="anchored" data-anchor-id="sec-ch17-exercises"><span class="header-section-number">17.9</span> Reading exercises</h2>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 17.1: cause an exception">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 17.1: cause an exception
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Submit a query with an unknown source type:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb7"><pre class="sourceCode numberSource sql number-lines code-with-copy"><code class="sourceCode sql"><span id="cb7-1"><a href="#cb7-1"></a><span class="kw">CREATE</span> PHYSICAL <span class="kw">SOURCE</span> <span class="cf">FOR</span> demo <span class="kw">TYPE</span> InvalidType <span class="kw">SET</span>();</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>You should see an <code>UnknownSourceType</code> exception (code 2017). Where in the binder is the type validated? Trace through the function from the binding error to the user-visible message.</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 17.2: trip an INVARIANT">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 17.2: trip an INVARIANT
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Find a place in the codebase that calls <code>INVARIANT</code> with a condition you can intentionally violate (e.g., a debug-only sanity check). In a debug build, modify the surrounding code to violate it. Run a query. The engine should crash with a stack trace. The exit is intentional and informative — that is the whole point of <code>INVARIANT</code>.</p>
+</div>
+</div>
+<div class="callout callout-style-default callout-important callout-titled" title="Reading exercise 17.3: chrome tracing">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+<span class="screen-reader-only">Important</span>Reading exercise 17.3: chrome tracing
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Enable <code>GoogleEventTracePrinter</code> (look for the configuration option in the worker’s startup code). Run a join systest. Drag the resulting JSON file into <code>chrome://tracing</code>. Identify the worker threads, the per-task durations, the gaps between tasks (when the worker is idle).</p>
+</div>
+</div>
+<hr>
+</section>
+<section id="sec-ch17-refs" class="level2" data-number="17.10">
+<h2 data-number="17.10" class="anchored" data-anchor-id="sec-ch17-refs"><span class="header-section-number">17.10</span> References</h2>
+<ul>
+<li><em>Error handling design.</em> <code>/Users/zeuchste/git/nebulastream/docs/design/20240711_error_handling.md</code>.</li>
+<li><em>Exception definitions.</em> <code>nes-common/include/ExceptionDefinitions.inc</code>.</li>
+<li><em>INVARIANT / PRECONDITION.</em> <code>nes-common/include/ErrorHandling.hpp</code>.</li>
+<li><em>spdlog.</em> G. Melman. <em>spdlog: Fast C++ logging library.</em> <code>https://github.com/gabime/spdlog</code>.</li>
+<li><em>cpptrace.</em> J. Robinson. <em>cpptrace: Simple, portable, and self-contained stacktrace library.</em> <code>https://github.com/jeremy-rifkin/cpptrace</code>.</li>
+<li><em>Chrome trace event format.</em> Google. <code>https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU</code>.</li>
+</ul>
+
+
+<div id="refs" class="references csl-bib-body hanging-indent" role="list" style="display: none">
+<div id="ref-spdlog" class="csl-entry" role="listitem">
+Melman, Gabi. 2014--. <em>Spdlog: Fast <span>C++</span> Logging Library</em>. <a href="https://github.com/gabime/spdlog">https://github.com/gabime/spdlog</a>.
+</div>
+</div>
+</section>
+
+</main> <!-- /main -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    // Ensure there is a toggle, if there isn't float one in the top right
+    if (window.document.querySelector('.quarto-color-scheme-toggle') === null) {
+      const a = window.document.createElement('a');
+      a.classList.add('top-right');
+      a.classList.add('quarto-color-scheme-toggle');
+      a.href = "";
+      a.onclick = function() { try { window.quartoToggleColorScheme(); } catch {} return false; };
+      const i = window.document.createElement("i");
+      i.classList.add('bi');
+      a.appendChild(i);
+      window.document.body.appendChild(a);
+    }
+    setColorSchemeToggle(hasAlternateSentinel())
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/nebula\.stream");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+            // target, if specified
+            link.setAttribute("target", "_blank");
+            if (link.getAttribute("rel") === null) {
+              link.setAttribute("rel", "noopener");
+            }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+<nav class="page-navigation">
+  <div class="nav-page nav-page-previous">
+      <a href="../chapters/16-stateful-operators.html" class="pagination-link" aria-label="Stateful Operators and State Management">
+        <i class="bi bi-arrow-left-short"></i> <span class="nav-page-text"><span class="chapter-number">16</span>&nbsp; <span class="chapter-title">Stateful Operators and State Management</span></span>
+      </a>          
+  </div>
+  <div class="nav-page nav-page-next">
+      <a href="../chapters/18-frontends.html" class="pagination-link" aria-label="The Worker Process and Client Frontends">
+        <span class="nav-page-text"><span class="chapter-number">18</span>&nbsp; <span class="chapter-title">The Worker Process and Client Frontends</span></span> <i class="bi bi-arrow-right-short"></i>
+      </a>
+  </div>
+</nav>
+</div> <!-- /content -->
+<footer class="footer">
+  <div class="nav-footer">
+    <div class="nav-footer-left">
+<p>© CC BY-SA — code excerpts under Apache-2.0 from NebulaStream</p>
+</div>   
+    <div class="nav-footer-center">
+<p><a href="https://nebula.stream">nebula.stream</a> · <a href="https://github.com/nebulastream/nebulastream">github</a></p>
+<div class="toc-actions d-sm-block d-md-none"><ul><li><a href="https://github.com/nebulastream/nebulastream-book/edit/main/chapters/17-error-handling.qmd" class="toc-action"><i class="bi bi-github"></i>Edit this page</a></li><li><a href="https://github.com/nebulastream/nebulastream-book/issues/new" class="toc-action"><i class="bi empty"></i>Report an issue</a></li></ul></div></div>
+    <div class="nav-footer-right">
+<p>Built with <a href="https://quarto.org">Quarto</a></p>
+</div>
+  </div>
+</footer>
+
+
+
+
+<script src="../site_libs/quarto-html/zenscroll-min.js"></script>
+</body></html>

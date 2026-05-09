@@ -1,0 +1,61 @@
+# CODEOWNERS for nebulastream/nebulastream-book
+#
+# Each chapter has an associated maintainer reviewer in
+# WRITING_PLAN.md. Once the relevant GitHub teams exist under the
+# nebulastream organisation, fill in the team handles below.
+# Until then, all PRs default to a placeholder reviewer team
+# (@nebulastream/maintainers) — replace with the real team handle.
+#
+# The point of CODEOWNERS here is documentary first, enforcing second:
+# it makes the per-chapter reviewer assignments visible at PR time.
+
+# Default: any change requires a maintainer review.
+*                                            @nebulastream/maintainers
+
+# Build & infra
+/.github/                                    @nebulastream/maintainers
+/scripts/                                    @nebulastream/maintainers
+/Makefile                                    @nebulastream/maintainers
+/_quarto.yml                                 @nebulastream/maintainers
+/PINNED_COMMIT                               @nebulastream/maintainers
+
+# Theme — visual identity should match www.nebula.stream
+/theme/                                      @nebulastream/maintainers
+
+# Per-chapter review assignments. The handles below are placeholders;
+# replace with actual GitHub usernames or team handles when known.
+
+# Part I — Foundations
+/chapters/01-why-streaming.qmd               @nebulastream/maintainers
+/chapters/02-system-tour.qmd                 @nebulastream/maintainers
+/chapters/03-data-model.qmd                  @nebulastream/maintainers
+/chapters/04-buffer-management.qmd           @nebulastream/maintainers
+
+# Part II — Query Frontier
+/chapters/05-query-language.qmd              @nebulastream/maintainers
+/chapters/06-logical-algebra.qmd             @nebulastream/maintainers
+/chapters/07-watermarks.qmd                  @nebulastream/maintainers
+/chapters/08-sources-sinks.qmd               @nebulastream/maintainers
+
+# Part III — Optimisation & Compilation
+/chapters/09-rule-based-optimization.qmd     @nebulastream/maintainers
+/chapters/10-physical-lowering.qmd           @nebulastream/maintainers
+/chapters/11-pipelining.qmd                  @nebulastream/maintainers
+/chapters/12-nautilus-codegen.qmd            @nebulastream/maintainers
+/chapters/13-plugins.qmd                     @nebulastream/maintainers
+
+# Part IV — Runtime
+/chapters/14-task-execution.qmd              @nebulastream/maintainers
+/chapters/15-two-queue-scheduler.qmd         @nebulastream/maintainers
+/chapters/16-stateful-operators.qmd          @nebulastream/maintainers
+/chapters/17-error-handling.qmd              @nebulastream/maintainers
+/chapters/18-frontends.qmd                   @nebulastream/maintainers
+
+# Part V — Operations & Frontiers
+/chapters/19-distributed-deployment.qmd      @nebulastream/maintainers
+/chapters/20-testing.qmd                     @nebulastream/maintainers
+/chapters/21-benchmarking.qmd                @nebulastream/maintainers
+/chapters/22-open-problems.qmd               @nebulastream/maintainers
+
+# Appendices
+/appendices/                                 @nebulastream/maintainers

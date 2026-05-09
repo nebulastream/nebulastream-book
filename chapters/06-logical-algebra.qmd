@@ -1,0 +1,304 @@
+# Logical Operator Algebra {#sec-logical-algebra}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+A logical plan is what the engine has decided your query *means*,
+expressed as a directed acyclic graph of operators. Each operator
+declares its inputs and its output. The graph is the engine's
+internal language for "what to compute"; everything from
+optimisation through code generation operates on it.
+
+This chapter walks through the operator vocabulary, the structural
+properties of the graph (immutable, type-erased, schema-annotated),
+and the conventions that recur in later parts of the book.
+
+---
+
+## 6.1 The operator family {#sec-operator-family}
+
+Every logical operator in NebulaStream lives in
+`nes-logical-operators/include/Operators/`. The full list as of the
+pinned commit:
+
+| Operator | Purpose |
+|---|---|
+| `SourceDescriptorLogicalOperator` | Bound source; produces tuples |
+| `InlineSinkLogicalOperator` | Bound sink; consumes tuples |
+| `ProjectionLogicalOperator` | Selects/computes a subset of fields |
+| `SelectionLogicalOperator` | Filters tuples by a predicate |
+| `UnionLogicalOperator` | Concatenates two streams of compatible schema |
+| `JoinLogicalOperator` | Stream-stream join, typically windowed |
+| `WindowedAggregationLogicalOperator` | Aggregate per window |
+
+Eight operators. Notably absent:
+
+- **No DISTINCT.** Use windowed aggregation with a no-op aggregate.
+- **No subqueries.** No correlated joins, no `EXISTS`. The streaming
+  model does not lend itself to them.
+- **No SORT.** Streams are unordered modulo watermark progress; a
+  total order is not a primitive.
+
+This minimalism is, again, intentional. Streaming queries are
+shallow; complicating the algebra adds optimiser surface without
+adding meaningful workloads.
+
+---
+
+## 6.2 The C++20 concept twist {#sec-concept-design}
+
+The operator hierarchy is not a virtual class hierarchy. Instead,
+NebulaStream uses C++20 concepts to define what a logical operator
+*is*, then type-erases concrete operators behind a wrapper:
+
+```cpp
+// nes-logical-operators/include/Operators/LogicalOperator.hpp
+template <typename T>
+concept LogicalOperatorConcept = requires(T t) {
+    { t.explain() } -> std::convertible_to<std::string>;
+    { t.getChildren() }
+        -> std::convertible_to<std::vector<LogicalOperator>>;
+    { t.withChildren(std::vector<LogicalOperator>{}) }
+        -> std::convertible_to<LogicalOperator>;
+    { t.getOutputSchema() }
+        -> std::convertible_to<Schema>;
+    { t.getInputSchemas() }
+        -> std::convertible_to<std::vector<Schema>>;
+};
+```
+
+A type satisfies the concept if it has those five methods.
+`LogicalOperator` itself is a type-erased reference type: under the
+hood it stores an `any`-like container plus a vtable of pointers to
+those five concept methods, so the cost of dispatch is the same as
+a virtual call but the *concrete operator types* never need to
+inherit from anything.
+
+The benefit is composition. A user-defined operator only needs to
+satisfy the concept; it does not need to inherit from
+`LogicalOperator`. Adding a new operator (say, a hypothetical
+`LimitLogicalOperator` from Chapter 5's exercise) is a class with
+five methods, not a class deriving from a chain of bases.
+
+::: {.callout-tip title="Real-system reference: how Calcite does this"}
+Apache Calcite uses traditional inheritance: every operator
+extends `RelNode` (a 4000-line virtual class) and its rule engine
+walks a class hierarchy. The result is faster to grow at scale
+(easier to add framework-wide functionality) but harder to extend
+from outside (every new operator inherits a lot of implicit
+contract).
+
+NebulaStream's concept-based approach is the inverse trade. Easier
+to extend from outside; needs more discipline at the framework
+level because the contract is enforced only at use sites, not in a
+shared base class.
+:::
+
+---
+
+## 6.3 The plan as an immutable DAG {#sec-immutable-dag}
+
+A `LogicalPlan` is a vector of root operators. The DAG is read by
+walking children:
+
+```cpp
+// nes-logical-operators/include/Plans/LogicalPlan.hpp
+class LogicalPlan {
+public:
+    LogicalPlan() = delete;
+    explicit LogicalPlan(LogicalOperator rootOperator);
+    explicit LogicalPlan(QueryId queryId,
+                         std::vector<LogicalOperator> rootOperators);
+    [[nodiscard]] QueryId getQueryId() const;
+    [[nodiscard]] std::vector<LogicalOperator> getRootOperators() const;
+    [[nodiscard]] LogicalPlan withRootOperators(
+        const std::vector<LogicalOperator>& operators) const;
+private:
+    QueryId queryId = INVALID_QUERY_ID;
+    std::vector<LogicalOperator> rootOperators;
+    std::string originalSql;
+};
+```
+
+The plan is *immutable*. There is no `setRootOperators`; instead,
+`withRootOperators` returns a new plan. Optimiser rules accept a
+plan and return a transformed plan; they never mutate in place.
+
+Two consequences fall out of this.
+
+**Plans are cheap to share.** A plan in mid-optimisation can be
+reasoned about by multiple rule engines without any defensive
+copying. Each rule's output is a different plan; they coexist.
+
+**Plans are cheap to inspect.** A debugger or logger can dump a
+plan without worrying about race conditions or visiting an in-
+progress mutation. We use this in Chapter 9 when we walk through
+optimiser-rule output.
+
+The cost is allocation: every transformation allocates a new top-
+level `LogicalPlan` object, plus any operator nodes that changed.
+Because operators inside the plan are reference-counted (they share
+their type-erased payloads through `shared_ptr`-like pointers),
+unchanged subtrees are shared. The actual copy cost is small.
+
+---
+
+## 6.4 Stateful operators carry extra metadata {#sec-stateful-metadata}
+
+Stateless operators (Projection, Selection, Union) carry only
+their input and output schemas. Stateful operators carry more.
+
+The `WindowedAggregationLogicalOperator` is representative:
+
+```cpp
+// nes-logical-operators/include/Operators/Windows/WindowedAggregationLogicalOperator.hpp
+class WindowedAggregationLogicalOperator final : public OriginIdAssigner {
+public:
+    WindowedAggregationLogicalOperator(
+        std::vector<FieldAccessLogicalFunction> groupingKey,
+        std::vector<std::shared_ptr<WindowAggregationLogicalFunction>>
+            aggregationFunctions,
+        std::shared_ptr<Windowing::WindowType> windowType);
+    [[nodiscard]] bool isKeyed() const;
+    [[nodiscard]] std::vector<std::shared_ptr<WindowAggregationLogicalFunction>>
+        getWindowAggregation() const;
+    [[nodiscard]] std::shared_ptr<Windowing::WindowType> getWindowType() const;
+    [[nodiscard]] std::vector<FieldAccessLogicalFunction>
+        getGroupingKeys() const;
+};
+```
+
+Three pieces of metadata: a grouping key (possibly empty for global
+aggregation), a list of aggregation functions, and a window type.
+The window type is a separate `Windowing::WindowType` hierarchy
+covering tumbling, sliding, and session windows. Chapter 7 uses
+this object pervasively when discussing watermark-driven triggering.
+
+`OriginIdAssigner` is a base mixin: stateful operators *create
+new origins*. The output of an aggregation is logically a new
+stream, with a fresh `OriginId`; downstream operators reason about
+its watermarks independently of the input streams. We will see
+this machinery in Chapter 7.
+
+::: {.callout-note title="Example 6.1: a windowed aggregation plan"}
+For `SELECT key, AVG(speed) FROM vehicles GROUP BY key WINDOW
+TUMBLING(creationTS, SIZE 1 SECOND) INTO alerts`, the bound plan
+shape is:
+
+```
+SinkLogicalOperator(alerts)
+└── WindowedAggregationLogicalOperator(
+        groupingKey={vehicles$key},
+        aggregations=[Avg(vehicles$speed)],
+        window=TumblingWindow(creationTS, 1s))
+    └── SourceDescriptorLogicalOperator(vehicles)
+```
+
+Three operators. Note that `SELECT key` and `SELECT
+AVG(speed)` are not separate Projection nodes — they are
+absorbed into the aggregation operator's grouping key and
+aggregation functions, respectively. This is a small but
+worth-noting fact: NebulaStream's algebra does not separate
+"compute the aggregation" from "project the result"; they are one
+operator.
+:::
+
+---
+
+## 6.5 The trait set: optimiser scratchpad {#sec-trait-set}
+
+Each operator carries a *trait set* — a set of decorations that
+optimiser passes attach to record decisions. Examples:
+
+- `JoinImplementationTypeTrait` — set by `DecideJoinTypesRule`,
+  records whether the join should be a hash join or a nested-loop
+  join.
+- `MemoryLayoutTrait` — set by `DecideMemoryLayoutRule`, records
+  the chosen row/columnar layout.
+- `OriginIdTrait` — set by `OriginIdInferenceRule`, records the
+  origin identifier of the operator's output.
+
+Traits are a generic mechanism. Each trait is a class; an operator
+holds a `TraitSet` (essentially a typed map) and exposes
+`getTrait<T>()` to retrieve a specific trait if present. Traits are
+how optimiser passes communicate downstream without baking decisions
+into operator constructors.
+
+We will see traits used extensively in Chapter 9 (rule-based
+optimisation) and Chapter 10 (physical lowering).
+
+---
+
+## 6.6 Reading a plan {#sec-reading-plan}
+
+A `LogicalPlan` has an `explain()` method that produces a textual
+representation, useful for debugging and tests. The output is
+indented to show the tree structure:
+
+```
+SinkLogicalOperator(name=alerts, schema={vehicles$key: UINT64, avgSpeed: FLOAT64})
+└── WindowedAggregationLogicalOperator(window=Tumbling(1s), groupingKey=[vehicles$key], aggregations=[Avg(vehicles$speed)])
+    └── SourceDescriptorLogicalOperator(name=vehicles, schema={…})
+```
+
+Most systests assert on this textual representation. If you change
+an operator's schema or its trait set, the explain string changes,
+and a test failure tells you something visible has shifted.
+
+---
+
+## Summary {#sec-ch6-summary}
+
+NebulaStream's logical algebra is small (eight operators), built on
+C++20 concepts rather than virtual inheritance, immutable (a
+transformation produces a new plan), and decorated by an optimiser-
+extensible trait set. Stateful operators carry extra metadata —
+window type, grouping key, aggregation functions — and create new
+origins so downstream operators can reason about their watermarks
+independently. The minimalism of the algebra is matched by the
+minimalism of the optimiser (Chapter 9), and the immutability is
+matched by the pure-function style of the optimiser phases.
+
+---
+
+## Reading exercises {#sec-ch6-exercises}
+
+::: {.callout-important title="Reading exercise 6.1: explain three plans"}
+For each of these queries, write down (or run and capture) the
+expected `explain()` output:
+
+1. `SELECT value FROM demo INTO result;`
+2. `SELECT value FROM demo WHERE value > 100 INTO result;`
+3. `SELECT key, COUNT(*) FROM demo GROUP BY key WINDOW
+   TUMBLING(ts, SIZE 1 SEC) INTO counts;`
+
+How many operators in each plan? Which carry trait sets?
+:::
+
+::: {.callout-important title="Reading exercise 6.2: confirm immutability"}
+In a debugger, set a breakpoint at the entry of any optimiser
+rule's `apply` method (e.g., `RedundantProjectionRemovalRule::apply`).
+Inspect the input plan's address. Run the rule. Inspect the
+returned plan's address. Confirm they differ.
+:::
+
+::: {.callout-important title="Reading exercise 6.3: implement a no-op operator"}
+Sketch (no need to compile) a class `NoOpLogicalOperator` that
+implements the `LogicalOperatorConcept`: passes its input through
+unchanged. What are the five required methods, what does each
+return? You should be able to write the class in 30 lines.
+:::
+
+---
+
+## References {#sec-ch6-refs}
+
+- *LogicalOperator concept.*
+  `nes-logical-operators/include/Operators/LogicalOperator.hpp`.
+- *LogicalPlan.*
+  `nes-logical-operators/include/Plans/LogicalPlan.hpp`.
+- *WindowedAggregationLogicalOperator.*
+  `nes-logical-operators/include/Operators/Windows/WindowedAggregationLogicalOperator.hpp`.
+- *Type erasure in modern C++.* S. Parent. *Better Code: Runtime
+  Polymorphism.* CppCon 2017.
+- *Apache Calcite RelNode.* E. Begoli et al., SIGMOD 2018.

@@ -1,0 +1,115 @@
+# Coding Conventions {#sec-app-conventions .unnumbered}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+A condensed reference of NebulaStream's C++ conventions, intended
+to make code listings throughout the book self-explanatory. The
+authoritative source is
+`/Users/zeuchste/git/nebulastream/docs/coding_guidelines.md` (~346
+lines) and `docs/naming_conventions.md` (~60 lines); this
+appendix summarises.
+
+---
+
+## B.1 Formatting {#sec-app-formatting}
+
+- **clang-format-19**, WebKit-based style.
+- **140-column line limit.** Generous compared to the typical 80
+  or 100; the team prefers to break long expressions only when
+  unavoidable.
+- **4-space indent.** Spaces, not tabs.
+- **`#pragma once`** for header guards; no include guards.
+- **Angle brackets** (`#include <foo/Bar.hpp>`) for all includes;
+  never relative paths (`#include "../bar.hpp"`).
+- **No `using namespace` in global scope of headers.** Avoids
+  cross-translation-unit name pollution.
+
+The `format` and `check-format` CMake targets enforce this.
+
+---
+
+## B.2 Naming {#sec-app-naming}
+
+- **Classes/structs:** `CamelCase` (e.g., `QueryOptimizer`,
+  `TupleBuffer`, `WindowedAggregationLogicalOperator`).
+- **Methods, functions, variables, parameters:** `camelBack`
+  (e.g., `optimize()`, `logicalPlan`, `queryId`).
+- **Enum classes:** the enum and its entries are both `CamelCase`
+  (e.g., `enum class Color : int8_t { Red, Green };`).
+- **Constants:** `UPPER_CASE` (e.g., `INVALID_QUERY_ID`,
+  `DEFAULT_BUFFER_SIZE`).
+- **Type specialisations:** `{Spec}{Interface}` pattern. A `Source`
+  implementation for files is `FileSource`; a `Sink` implementation
+  for printing is `PrintSink`. The pattern makes plugin types
+  greppable.
+
+---
+
+## B.3 Error handling {#sec-app-errors}
+
+- **Bugs**: `INVARIANT` and `PRECONDITION` macros (Chapter 17).
+  Compiled out in `Release` and `Benchmark` builds via
+  `#define NO_ASSERT`.
+- **Recoverable errors**: throw exceptions (by value), catch by
+  `const&`. Typed exceptions only.
+- **Expected-but-unsuccessful outcomes**: `std::expected<T,
+  Exception>` or `std::optional<T>`.
+- All exception types live in a single file:
+  `nes-common/include/ExceptionDefinitions.inc`. Do not define
+  exceptions elsewhere.
+
+---
+
+## B.4 Ownership {#sec-app-ownership}
+
+- **Prefer value semantics** by default. Pass-by-value, return-by-
+  value, prefer composition over containment-by-pointer.
+- **`unique_ptr`** for exclusive ownership. The default for
+  performance-critical code that needs heap allocation.
+- **`shared_ptr`** only where ownership is genuinely shared. The
+  atomic refcount is not free; use sparingly.
+- **No raw `new` or `malloc`.** No raw pointers for ownership.
+  Raw pointers are non-owning observers.
+- **`static_cast` / `dynamic_cast`**, never C-style casts.
+
+---
+
+## B.5 Const-correctness and const by default {#sec-app-const}
+
+- **`const` by default** — Rust-like. Mark variables `const`
+  unless they need to mutate. Mark methods `const` unless they
+  modify state.
+- **Pass `const&` for non-trivial types** that the function does
+  not need to mutate.
+- **Return `const&` only when you can guarantee the lifetime** of
+  the referenced object. Otherwise return by value.
+
+---
+
+## B.6 Other {#sec-app-other}
+
+- **Operator overloads** (`+`, `-`, `<<`) preferred over named
+  methods (`add()`, `toString()`) where natural. The `<<` operator
+  for stream output is the canonical "to-string" mechanism.
+- **`NAMEOF_TYPE(T)`** instead of `typeid(T).name()`. Avoids
+  RTTI dependencies.
+- **Structs for POD; classes for anything with non-public
+  members.** A type with private state is a `class`; a type that
+  is just data is a `struct`.
+
+---
+
+## B.7 Common abbreviations {#sec-app-abbrev}
+
+In code and comments:
+
+| Abbreviation | Meaning |
+|---|---|
+| `TB` | TupleBuffer |
+| `BM` | BufferManager |
+| `OP` | Operator |
+| `LHS / RHS` | LeftHandSide / RightHandSide |
+| `SS` | StringStream |
+
+The full glossary is in Appendix C.

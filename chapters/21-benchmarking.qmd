@@ -1,0 +1,252 @@
+# Benchmarking and Performance Engineering {#sec-benchmarking}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+A streaming engine that produces correct answers slowly is, for
+most workloads, useless. NebulaStream cares about performance
+deeply enough to track it continuously, expose it through a public
+dashboard, and run a dedicated instrumentation build alongside the
+debug and release builds.
+
+This chapter walks through how the engine is benchmarked, what
+infrastructure exists, and which performance gotchas are worth
+knowing.
+
+---
+
+## 21.1 Conbench: continuous benchmarking {#sec-conbench}
+
+The README points at a Conbench instance at
+`bench.nebula.stream/c-benchmarks/`. Conbench [@conbench] is a
+benchmarking framework that runs the engine's benchmark suite on
+every commit and tracks results over time. The dashboard shows:
+
+- Per-benchmark throughput and latency graphs across commits.
+- Regression detection (a commit that slows a benchmark by more
+  than a configurable threshold flags up).
+- Per-architecture breakdowns (x86_64, ARM).
+
+This is the engine's primary tool for catching performance
+regressions. A bug that drops join throughput by 20% will show
+on the Conbench graph before it shows in any user complaint.
+
+---
+
+## 21.2 The benchmark suite {#sec-benchmark-suite}
+
+Two locations:
+
+- **Microbenchmarks.** `nes-common/benchmarks/` for component-
+  level tight loops. Things like the `ExceptionBenchmark.cpp`
+  that measures the cost of throwing/catching an exception.
+- **Macrobenchmarks.** `nes-systests/benchmark/` and
+  `nes-systests/benchmark_small/` for full end-to-end query
+  benchmarks. These reuse the systest format from Chapter 20 with
+  one difference: the expected-output section is replaced with
+  a throughput target and the test is judged on time-to-complete
+  rather than correctness alone.
+
+The macrobenchmark suite includes recognisable industry workloads:
+
+- **Yahoo Streaming Benchmark.** Aggregation over a stream of
+  ad-impression events. The classic benchmark for streaming
+  engines.
+- **Linear Road.** Spatial-temporal event processing across road
+  segments. From the original Aurora paper.
+- **Manufacturing.** Industrial IoT scenario; per-machine and
+  per-product event aggregation.
+
+Each benchmark has a small variant (in `benchmark_small/`) that
+runs in CI on every commit, and a full variant that runs nightly.
+
+---
+
+## 21.3 The instrumentation build {#sec-instrumentation-build}
+
+The repository has four build directories that each correspond
+to a build type:
+
+- `cmake-build-debug` — debug build with full assertions and
+  TRACE logging.
+- `cmake-build-release` — release build with -O3 and ERROR
+  logging.
+- `cmake-build-docker` — release build inside the Docker dev
+  image.
+- `cmake-build-instrumentation` — a special build with
+  performance instrumentation enabled.
+
+The instrumentation build is the one the team uses for serious
+performance work. It enables:
+
+- Per-buffer latency instrumentation (the four-point latency
+  measurement mentioned in the engine's recent commit messages).
+- Detailed per-operator and per-pipeline statistics.
+- Profiler-friendly symbols (frame pointers, no aggressive
+  inlining).
+
+Instrumentation builds are slower than release but expose the
+data needed for performance analysis. The CI does not run them on
+every commit; they are typically used on dedicated hardware for
+specific benchmarking sessions.
+
+---
+
+## 21.4 The sanitizer matrix {#sec-sanitizer-matrix}
+
+Performance work and correctness work intersect in the sanitizer
+matrix. The CI matrix in CLAUDE.md describes:
+
+> x86_64/arm64 × libcxx/libstdcxx × Debug/RelWithDebInfo/Release ×
+> address/undefined/thread/none sanitizers + clang-tidy diff +
+> code coverage.
+
+Each axis multiplies the build cost. The full matrix is large and
+runs nightly; subsets run on every PR.
+
+**ASan** (address sanitizer) catches buffer overruns, use-
+after-frees, and memory leaks. NebulaStream's reference-counted
+buffer pool means leaks are rare, but ASan still catches edge
+cases.
+
+**TSan** (thread sanitizer) catches data races. The two-queue
+scheduler (Chapter 15) and the lock-free hash maps (Chapter 16)
+get the most use of TSan. Streaming engines are concurrent by
+nature; TSan catches what locks miss.
+
+**UBSan** (undefined behaviour sanitizer) catches signed integer
+overflow, null-pointer dereferences, alignment violations.
+Important for any C++ codebase, especially one with hot paths
+written in raw arithmetic.
+
+These do not run in production builds — sanitizers add
+substantial overhead — but they catch enough bugs in CI that
+keeping them in the matrix pays for itself many times over.
+
+---
+
+## 21.5 Performance gotchas worth knowing {#sec-performance-gotchas}
+
+A handful of subtleties show up repeatedly in NebulaStream
+performance work.
+
+**INTERPRETER mode is 10-100× slower than COMPILER.** Mentioned
+in earlier chapters but worth reiterating: do not benchmark
+INTERPRETER mode unless you are studying the interpreter
+specifically.
+
+**Buffer-pool sizing matters.** A pool that is too small backpressures
+sources and limits throughput. A pool that is too large wastes
+memory the engine could be using for hash maps. The default 1024
+buffers is a reasonable starting point; the right value for
+production workloads depends on operator concurrency.
+
+**Logging is expensive.** TRACE-level logging on a hot path costs
+thousands of cycles per record. Benchmarking with TRACE is
+benchmarking the logger, not the engine. Use Release or
+Benchmark builds, not Debug, for performance numbers.
+
+**Sanitizers slow things down a lot.** TSan can be 5-10× slower
+than a clean build. Do not be alarmed if a sanitizer-equipped
+benchmark shows numbers very different from a release benchmark;
+they are measuring different things.
+
+**The format-conversion bottleneck.** For some workloads (CSV-
+heavy ingestion), the engine's hot path is in the input
+formatter, not the operators. Profilers should focus there
+first.
+
+::: {.callout-tip title="Real-system reference: Flink's benchmarking"}
+Apache Flink runs its own continuous benchmarking
+infrastructure ([flink.apache.org/benchmarks](https://flink.apache.org/benchmarks/)).
+Looking at Flink's numbers next to NebulaStream's is
+instructive — Flink, being a JVM engine running in the cloud, is
+optimised for sustained throughput on a stable cluster;
+NebulaStream is optimised for low latency in heterogeneous
+deployments. The benchmarks each system runs reflect those
+priorities. A horse-race comparison would be misleading; a
+side-by-side comparison of *which workloads each engine is
+strong on* would be illuminating.
+:::
+
+---
+
+## 21.6 What to measure when starting work {#sec-what-to-measure}
+
+For someone about to do performance work on NebulaStream:
+
+1. **Run the relevant benchmark first.** Establish a baseline. If
+   you change `nes-query-engine/`, run the join benchmark before
+   and after.
+
+2. **Use the Chrome trace.** Enable
+   `GoogleEventTracePrinter` (Chapter 17) and visualise. The
+   trace will show you exactly which operators are taking time
+   and which are idle.
+
+3. **Profile with `perf` or Instruments.** A flame graph on the
+   instrumentation build shows where cycles go. Most hot-path
+   surprises live here.
+
+4. **Compare modes.** If COMPILER is slow, INTERPRETER will tell
+   you whether the slowness is in operator logic or in the JIT.
+
+5. **Compare commits.** Conbench gives you a per-commit baseline.
+   Did your change regress a benchmark? Conbench will tell you.
+
+The engine has invested visibly in these tools. Use them.
+
+---
+
+## Summary {#sec-ch21-summary}
+
+NebulaStream's performance engineering rests on continuous
+benchmarking via Conbench, a multi-build matrix that includes
+debug, release, and instrumentation builds, and a CI sanitizer
+matrix that runs ASan, TSan, and UBSan across architectures and
+libcxx flavours. The benchmark suite includes industry-standard
+workloads (Yahoo Streaming, Linear Road) plus engine-specific
+microbenchmarks. Common performance gotchas — INTERPRETER mode
+overhead, logging cost, sanitizer slowdowns, format-conversion
+bottlenecks — are catalogued for the practitioner. The Chrome
+trace and per-buffer instrumentation are the engine's primary
+visualisation tools.
+
+---
+
+## Reading exercises {#sec-ch21-exercises}
+
+::: {.callout-important title="Reading exercise 21.1: open Conbench"}
+Visit `https://bench.nebula.stream/c-benchmarks/`. Look at one
+benchmark's history graph over the last 100 commits. Do you see
+any regressions? Any improvements? What changed?
+:::
+
+::: {.callout-important title="Reading exercise 21.2: build instrumentation"}
+Configure and build with the instrumentation flag enabled (look
+for the relevant CMake option in the build directory layout).
+Run a join benchmark. How much slower is it than the release
+build? What additional output does it produce?
+:::
+
+::: {.callout-important title="Reading exercise 21.3: TSan a lock-free path"}
+Build with `-DNES_USE_SANITIZER=thread` and run the
+`TaskQueueTest` from Chapter 15. TSan will instrument the
+folly queues and the semaphore. Are there any reported races?
+There should be none — but if there were, TSan is exactly the
+tool that would catch them.
+:::
+
+---
+
+## References {#sec-ch21-refs}
+
+- *Conbench.* `https://github.com/conbench/conbench`.
+- *NebulaStream benchmarks.* `https://bench.nebula.stream`.
+- *Yahoo streaming benchmark.* M. Chintapalli et al., *Benchmarking
+  Streaming Computation Engines.* IPDPSW 2016.
+- *Linear road.* A. Arasu et al., *Linear Road: A Stream Data
+  Management Benchmark.* VLDB 2004.
+- *AddressSanitizer.* K. Serebryany et al., USENIX ATC 2012.
+- *ThreadSanitizer.* K. Serebryany, T. Iskhodzhanov, *ThreadSanitizer
+  — data race detection in practice.* WBIA 2009.

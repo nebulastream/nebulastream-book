@@ -1,0 +1,406 @@
+# Task-Based Execution Model {#sec-task-execution}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+A query plan is a static description of what to compute. A
+running query is the dynamic process of computing it. The bridge
+between the two is the execution model: how operators get scheduled,
+how state is held while operators run, how the lifecycle of a
+query is managed.
+
+NebulaStream's execution model is task-based. Every unit of work —
+processing a `TupleBuffer`, starting a pipeline, stopping a source,
+firing a window — is a typed `Task`. Worker threads consume tasks
+from the queue (Chapter 15), execute them, and emit follow-up
+tasks. There is no separate control plane; lifecycle and data flow
+share the same queue.
+
+This chapter walks through the data structures: `ExecutableQueryPlan`,
+`RunningQueryPlan`, `RunningSource`, the `Task` variant. We have
+already met the queue in Chapter 15; now we look at what it
+schedules.
+
+---
+
+## 14.1 The lifetime of a query: three states {#sec-query-states}
+
+A query passes through three states inside the engine:
+
+**Compiled.** A `CompiledQueryPlan` is the artefact produced by
+the compile pipeline (Chapter 11). It is a passive description:
+function pointers, source descriptors, sink descriptors. Nothing
+runs yet.
+
+**Executable.** When the engine accepts a `CompiledQueryPlan`, it
+constructs an `ExecutableQueryPlan` from it. The executable wraps
+the compiled stages with runtime context: per-pipeline operator
+handlers, callbacks for completion, identifiers. Still passive,
+but ready to be started.
+
+**Running.** When the user (or the engine's auto-start logic)
+asks the engine to start the query, the executable becomes a
+`RunningQueryPlan` plus per-pipeline `RunningQueryPlanNode`s plus
+per-source `RunningSource`s. The sources begin emitting `WorkTask`s.
+The query is alive.
+
+These states are not just naming conventions. They correspond to
+distinct types in `nes-query-engine/`:
+
+```
+CompiledQueryPlan        # nes-executable/
+  ↓ (engine.registerQuery)
+ExecutableQueryPlan      # nes-query-engine/
+  ↓ (engine.startQuery)
+RunningQueryPlan         # nes-query-engine/RunningQueryPlan.hpp
+  + RunningQueryPlanNode # one per pipeline
+  + RunningSource        # one per physical source
+```
+
+The transitions are explicit `StartQueryTask` and `StopQueryTask`
+operations, scheduled through the same task queue as data work.
+
+---
+
+## 14.2 The Task variant {#sec-task-variant-revisited}
+
+The full task variant lives in `nes-query-engine/Task.hpp`. We saw
+it in Chapter 15:
+
+```cpp
+// nes-query-engine/Task.hpp
+using Task = std::variant<
+    WorkTask,
+    StopQueryTask,
+    StartQueryTask,
+    FailSourceTask,
+    StopSourceTask,
+    PendingPipelineStopTask,
+    StopPipelineTask,
+    StartPipelineTask>;
+```
+
+Eight kinds of task. Two kinds of work: data (`WorkTask`) and
+lifecycle (the rest). Worker threads dispatch on the variant via
+`std::visit`:
+
+```cpp
+// nes-query-engine/QueryEngine.cpp (sketch)
+void handleTask(Task task)
+{
+    std::visit([&](auto& concrete) {
+        runHandler(concrete);
+    }, task);
+}
+```
+
+Each task type has a dedicated handler. `WorkTask` handlers call
+the compiled pipeline's function pointer with the buffer; lifecycle
+handlers consult the query catalog and adjust the running state.
+
+The variant pattern means there is no virtual dispatch in the task
+hierarchy itself — the dispatch is a `std::visit` jump table — and
+every task type is type-checked at compile time. Adding a new task
+type is adding a member to the variant and writing one handler.
+
+---
+
+## 14.3 RunningQueryPlanNode: pipelines as runtime objects {#sec-rqpn}
+
+The runtime counterpart of a pipeline is a `RunningQueryPlanNode`,
+defined in `nes-query-engine/RunningQueryPlan.hpp`:
+
+```cpp
+// nes-query-engine/RunningQueryPlan.hpp (sketch)
+struct RunningQueryPlanNode {
+    PipelineId id;
+    std::atomic_bool requiresTermination = false;
+    std::atomic<ssize_t> pendingTasks = 0;
+    std::vector<std::shared_ptr<RunningQueryPlanNode>> successors;
+    std::unique_ptr<ExecutablePipelineStage> stage;
+    std::function<void(Exception)> unregisterWithError;
+    CallbackRef planRef;
+    void fail(Exception exception) const {
+        unregisterWithError(std::move(exception));
+    }
+};
+```
+
+Five fields deserve attention.
+
+**`pendingTasks`** is the count of in-flight `WorkTask`s
+referring to this pipeline. The `PendingPipelineStop` machinery
+from Chapter 15 polls this count to decide when a pipeline can
+be torn down.
+
+**`requiresTermination`** is a flag flipped on after the pipeline's
+setup phase completes. It tells the *deleter* (next paragraph)
+whether to emit a stop task when the node's reference count
+reaches zero. Setup-incomplete nodes can be deleted directly;
+setup-complete nodes must shut down gracefully.
+
+**`successors`** holds `shared_ptr`s to downstream nodes. This
+is the engine's reference graph: a parent node keeps its
+children alive. When a parent is dropped, the children's
+reference count decrements and (potentially) the cascade
+continues.
+
+**`stage`** is the compiled function (Chapter 11), held by
+`unique_ptr` because the pipeline node has exclusive ownership.
+
+**`unregisterWithError`** is the failure callback, captured at
+construction. `node.fail(exception)` invokes it; the callback
+reports up to the query lifetime listener and tears the query
+plan down.
+
+The reference-count machinery uses a custom deleter, not C++'s
+default `delete`:
+
+```cpp
+// nes-query-engine/RunningQueryPlan.cpp (sketch)
+struct RunningQueryPlanNodeDeleter {
+    WorkEmitter& emitter;
+    QueryId queryId;
+    void operator()(RunningQueryPlanNode* node) const noexcept {
+        if (node->requiresTermination.load()) {
+            emitter.emitPipelineStop(queryId, std::unique_ptr<RunningQueryPlanNode>(node));
+        } else {
+            delete node;
+        }
+    }
+};
+
+std::shared_ptr<RunningQueryPlanNode> RunningQueryPlanNode::create(
+    QueryId queryId, PipelineId pipelineId, WorkEmitter& emitter,
+    std::vector<std::shared_ptr<RunningQueryPlanNode>> successors,
+    std::unique_ptr<ExecutablePipelineStage> stage,
+    std::function<void(Exception)> unregisterWithError,
+    CallbackRef planRef, CallbackRef setupCallback)
+{
+    auto node = std::shared_ptr<RunningQueryPlanNode>(
+        new RunningQueryPlanNode(pipelineId, std::move(successors),
+                                 std::move(stage), std::move(unregisterWithError),
+                                 std::move(planRef)),
+        RunningQueryPlanNodeDeleter{.emitter = emitter, .queryId = queryId});
+    emitter.emitPipelineStart(queryId, node, std::move(setupCallback));
+    return node;
+}
+```
+
+When the last `shared_ptr` to a node is dropped, the deleter
+runs. If the node's setup completed (`requiresTermination ==
+true`), the deleter emits a `PipelineStop` task and *transfers
+ownership* of the raw pointer into a `unique_ptr` inside the
+task. The pipeline gets torn down asynchronously, on a worker
+thread, through the same task queue that processes data.
+
+Tasks reference pipelines through `weak_ptr`. A worker about to
+process a `WorkTask` first locks the `weak_ptr` to a `shared_ptr`;
+if the lock fails (the pipeline has been destroyed under us), the
+task is dropped. This is the engine's primary defence against
+use-after-free across worker threads, and it is the reason the
+custom deleter must transfer ownership through a task rather
+than tearing down inline — by the time the deleter runs, other
+worker threads may still hold weak_ptrs that they expect to
+locate cleanly.
+
+---
+
+## 14.4 RunningSource: a source instance lifecycle {#sec-running-source}
+
+The runtime counterpart of a `Source` (Chapter 8) is a
+`RunningSource`, in `nes-query-engine/RunningSource.hpp`. The
+`RunningSource` wraps a `SourceHandle` (the constructed source
+instance) and manages its lifecycle:
+
+- **Start.** A worker thread accepts a `StartPipelineTask` for the
+  source's source-pipeline; the running source begins reading
+  from its underlying source (`fillTupleBuffer`) and emitting
+  `WorkTask`s into the admission queue.
+- **Stop.** A `StopSourceTask` triggers a graceful shutdown. The
+  source stops reading; in-flight buffers continue to flow.
+- **Fail.** A `FailSourceTask` arrives if the source raises an
+  exception (e.g., the file disappears, the TCP connection
+  resets). The source is torn down; the query catalog is notified.
+
+`RunningSource` has its own state machine. Sources can be
+`STARTING`, `RUNNING`, `STOPPING`, `STOPPED`. The transitions are
+serialised through the same task queue, ensuring that a source
+cannot, for example, attempt to emit a `WorkTask` while it is
+mid-shutdown.
+
+---
+
+## 14.5 The NodeEngine: the bridge between compiled plan and runtime {#sec-node-engine}
+
+A small but important module we have not yet pinned down:
+`nes-runtime/`. It provides the `NodeEngine` class — the
+single object that owns the per-worker runtime context. Its
+job is to bridge from the compile pipeline's output (a
+`CompiledQueryPlan`) to the worker's execution machinery (the
+two-queue scheduler, the buffer pool, the source registry).
+
+Concretely, `NodeEngine` exposes:
+
+```cpp
+// nes-runtime/include/NodeEngine.hpp (sketch)
+class NodeEngine {
+public:
+    void registerQuery(std::unique_ptr<CompiledQueryPlan> plan);
+    void startQuery(QueryId id);
+    void stopQuery(QueryId id);
+    QueryStatus queryStatus(QueryId id) const;
+    // ...
+};
+```
+
+This is also where the `nes-executable/` module's
+`CompiledQueryPlan` lives, structurally:
+
+```cpp
+// nes-executable/include/CompiledQueryPlan.hpp (sketch)
+struct CompiledQueryPlan {
+    QueryId id;
+    std::vector<std::shared_ptr<ExecutablePipeline>> pipelines;
+    std::vector<SourceDescriptor> sources;
+    std::vector<SinkDescriptor> sinks;
+};
+
+class ExecutablePipeline {
+    PipelineId id;
+    std::unique_ptr<ExecutablePipelineStage> stage;
+    std::vector<std::shared_ptr<ExecutablePipeline>> successors;
+};
+```
+
+The `ExecutablePipelineStage` is the abstract interface that
+the JIT (Chapter 12) implements; `CompiledExecutablePipelineStage`
+is the concrete subclass holding the function pointer.
+`PipelineExecutionContext` (also in `nes-runtime/`) carries the
+per-pipeline runtime state — buffer providers, listeners — that
+operators consult during execution.
+
+The takeaway: `nes-executable/` defines the *shape* of a
+compiled query; `nes-runtime/` defines the *engine* that runs
+it. The query engine module (`nes-query-engine/`) holds the
+scheduler that schedules its tasks. The three modules are
+distinct because their lifetimes are different: a
+`CompiledQueryPlan` outlives any individual run; the
+`NodeEngine` lives for the worker's lifetime; the query engine's
+schedulable tasks come and go per buffer.
+
+## 14.6 Worker threads, work emitters, lifetime controllers {#sec-worker-interfaces}
+
+The worker side of the engine has two interfaces, in
+`nes-query-engine/Interfaces.hpp`:
+
+- **`WorkEmitter`** — the abstract interface a worker uses to
+  emit a follow-up task. The implementation is the engine's
+  internal queue; the interface keeps the worker decoupled from
+  the queue type. (This is the same interface that makes it easy
+  to mock the queue for tests.)
+- **`QueryLifetimeController`** — the abstract interface for
+  lifecycle changes (start, stop, fail). Concrete implementations
+  push tasks into the queue.
+
+These interfaces give the worker a small, stable contract. The
+worker does not know that it is using two folly queues; it knows
+that there is something it can put work into and something it can
+ask about query lifetime.
+
+---
+
+## 14.6 Putting it together: a tuple's journey {#sec-tuple-journey}
+
+To pull all these threads together, here is the journey of a
+single tuple through the running engine, from source to sink:
+
+1. A `RunningSource` for source `demo` calls
+   `Source::fillTupleBuffer` and gets back an 8 KiB buffer with,
+   say, 1024 tuples.
+2. The running source wraps the buffer in a `WorkTask` and writes
+   it to the admission queue via `WorkEmitter::emit`.
+3. A worker thread dequeues the `WorkTask`. It is for pipeline 1
+   (the source pipeline).
+4. The worker locks the weak_ptr in the task to the
+   `RunningQueryPlanNode` for pipeline 1. Increments
+   `pendingTasks`.
+5. The worker invokes the compiled function pointer for pipeline 1
+   on the buffer. The function loops over the 1024 tuples,
+   processes each (in our demo: identity projection), and writes
+   them to the sink's output formatter.
+6. As tuples are processed, the compiled code emits one or more
+   follow-up `WorkTask`s if the pipeline has downstream consumers
+   beyond the sink. (For our demo, there are no downstreams; the
+   sink is the end.)
+7. The function returns. The worker decrements `pendingTasks`.
+8. If the buffer originated as a source emission, the source's
+   completion callback runs.
+
+Steps 1–8 typically execute in microseconds for a small buffer.
+The queue, the weak_ptr lock, and the function call together add
+on the order of 100 ns of overhead per buffer; the rest is
+operator work.
+
+In a distributed deployment (Chapter 19), one further step is
+inserted at any pipeline boundary that crosses a worker: a
+`NetworkSink` serialises the buffer onto a Rust-side channel,
+and a `NetworkSource` deserialises it on the other side. From
+the worker's point of view the network sink/source pair looks
+identical to any other sink/source pair; the data plane between
+workers is the only piece that knows it is crossing a network.
+
+---
+
+## Summary {#sec-ch14-summary}
+
+The execution model is task-based and unified: data work and
+lifecycle work share a single typed `Task` variant, dispatched
+through `std::visit`. Pipelines are runtime objects
+(`RunningQueryPlanNode`) with reference counts that gate graceful
+shutdown. Sources are wrapped in `RunningSource` instances with
+their own state machines. Worker threads use small abstract
+interfaces (`WorkEmitter`, `QueryLifetimeController`) that decouple
+them from the queue and lifecycle implementation. The combination
+gives the engine a uniform model: every action is a task; every
+worker is a task processor.
+
+---
+
+## Reading exercises {#sec-ch14-exercises}
+
+::: {.callout-important title="Reading exercise 14.1: count tasks"}
+Run a join systest in TRACE mode. Count the number of each task
+variant produced over the test's lifetime. The ratio
+`WorkTask : lifecycle tasks` will be very large; that is the
+right thing to see.
+:::
+
+::: {.callout-important title="Reading exercise 14.2: trace a stop"}
+Submit a query, let it run for a few seconds, then stop it via
+`nes-repl`. In TRACE logs, find the sequence of `StopQueryTask`,
+`StopSourceTask`, `StopPipelineTask`, `PendingPipelineStopTask`.
+What is the order? Which tasks are emitted from the admission
+queue, which from the internal queue?
+:::
+
+::: {.callout-important title="Reading exercise 14.3: weak_ptr in action"}
+Add an `NES_DEBUG` log inside the worker's `lock()` of the
+`weak_ptr` in `WorkTask`. Force a query stop while traffic is
+in flight. You should see the lock occasionally fail (returning
+nullptr) for tasks that arrived after the pipeline was torn
+down. The dropped tasks are silently ignored.
+:::
+
+---
+
+## References {#sec-ch14-refs}
+
+- *Task variant.* `nes-query-engine/Task.hpp`.
+- *Engine interfaces.* `nes-query-engine/Interfaces.hpp`.
+- *RunningQueryPlan.* `nes-query-engine/RunningQueryPlan.hpp`.
+- *RunningSource.* `nes-query-engine/RunningSource.hpp`.
+- *Tagged-union dispatch.* B. Stroustrup. *The C++ Programming
+  Language*, 4th ed., on `std::variant`.
+- *Actor-model executors.* Discussion of Akka, Erlang, and similar
+  designs that, like NebulaStream, model lifecycle as messages.

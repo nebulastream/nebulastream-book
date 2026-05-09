@@ -1,0 +1,140 @@
+# Preface {.unnumbered}
+
+## What this book is
+
+There are good textbooks on databases. There is no textbook on a single
+modern stream processing engine.
+
+Garcia-Molina, Ullman and Widom's *Database Systems: The Complete Book*
+will teach you relational algebra, SQL, B-trees and the canonical query
+optimizer. Petrov's *Database Internals* will guide you through storage
+engines and distributed consensus. Kleppmann's *Designing Data-Intensive
+Applications* will give you the conceptual map of the data-systems
+landscape, batch and stream alike. None of them takes a single
+streaming system, opens it up, and walks you through what is actually
+inside.
+
+This book does that, using NebulaStream as the specimen. NebulaStream
+is an end-to-end data-management system for cloud-edge-sensor
+deployments, developed jointly at BIFOLD by the DIMA Group at TU Berlin
+and the DFKI IAM Group. It is written in C++23, generates native code
+for every query through a custom JIT framework called Nautilus, and is
+designed from the ground up to run across the full sensor-fog-cloud
+spectrum.
+
+We will not pretend NebulaStream is the only or best stream processing
+engine. We chose it because it is small enough to be tractable, large
+enough to be interesting, and unusually well-documented in tree. The
+techniques you will see — code generation, watermarks, two-queue
+schedulers, plugin registries — appear in Flink, in Materialize, in
+Arroyo, in Hyper. NebulaStream is the worked example. The lessons
+generalize.
+
+## What this book is not
+
+It is not a user manual. If you want to learn how to write a SELECT
+statement against NebulaStream, the official documentation will serve
+you better.
+
+It is not a comparative survey. Tyler Akidau, Slava Chernyak and Reuven
+Lax wrote *Streaming Systems* for that. We will compare to other
+engines in short, well-bounded sidebars when the comparison illuminates
+a NebulaStream design choice, and not otherwise.
+
+It is not a course in distributed systems theory. We assume you know
+why a leader election matters, what linearizability is, and why
+networks partition. Where NebulaStream's design depends on a particular
+theoretical result, we cite the paper and move on.
+
+## How to read it
+
+The book is organised into five parts.
+
+**Part I: Foundations** establishes the vocabulary. You will see how a
+SQL query becomes native code in roughly forty pages. The remaining
+twenty-one chapters fill in the steps.
+
+**Part II: The Query Frontier** covers the path from text to a logical
+plan: parser, algebra, time and watermarks, sources and sinks.
+
+**Part III: Optimization and Compilation** covers the path from a
+logical plan to executable native code: rule-based optimizer, physical
+lowering, pipelining, JIT code generation.
+
+**Part IV: Runtime and Execution** covers what happens when the
+generated code starts processing tuples: task scheduling, state
+management, error handling, the worker process.
+
+**Part V: Operations and Frontiers** covers everything around the engine:
+distributed deployment, testing, benchmarking, open research problems.
+
+Most chapters depend on Part I but are otherwise reasonably
+independent. If you are interested in code generation, jump to Chapter
+12. If you are interested in scheduling, jump to Chapter 15. The full
+chapter graph is in @sec-dependencies.
+
+## Conventions
+
+Throughout the book we use four kinds of callout boxes.
+
+::: {.callout-note title="Example 0.1: Anatomy of a callout"}
+**Examples** ground abstract definitions in concrete, runnable scenarios.
+They appear every few pages.
+:::
+
+::: {.callout-tip title="Real-system reference: how this differs in Flink"}
+**Real-system references** are short comparative sidebars, never longer
+than half a page. They place a NebulaStream design choice in the wider
+landscape.
+:::
+
+::: {.callout-important title="Reading exercise 0.1"}
+**Reading exercises** point you at a real test in `nes-systests/`. Run
+it, observe what happens, then come back. There are no problem-set-style
+exercises in this edition; a separate companion volume contains those.
+:::
+
+::: {.callout-warning title="Caveat"}
+**Caveats** flag where the live code differs from a published design
+document, where a feature is partially implemented, or where the
+authors disagree about the right approach.
+:::
+
+File paths are written in `monospace` and refer to a specific
+commit-pinned snapshot of NebulaStream. The pinned commit is recorded
+on the copyright page. Code listings name their source file and line
+range. If the file or range no longer resolves, the book's continuous
+integration job will warn before the next edition ships.
+
+## Acknowledgements
+
+To be filled in once the manuscript is complete.
+
+## A note on currency
+
+NebulaStream is an actively developed engine. The codebase
+moves; design documents do not. An earlier revision of this
+manuscript anchored several chapters on the in-tree
+`docs/design/` documents — which are dated 2024 — as if they
+described 2026 reality. They do not. The implementation has
+evolved significantly past several of those design documents,
+most visibly in the distribution layer (Chapter 19), where what
+was research roadmap in 2024 is the production data plane in
+2026.
+
+Chapter 19 has been rewritten to reflect this; smaller
+adjustments appear in Chapters 1, 2, 13, 14, 16, 18, and 22.
+The rule we have settled on for the rest of the manuscript:
+**design documents are historical context; the live code is
+authoritative.** Where we cite a design document, we cite it for
+the rationale it captures, not as a description of current
+state. The book's `scripts/drift-check.py` verifies that file
+paths and line ranges still resolve, but it cannot verify that
+*narratives* still match behaviour. That part requires
+maintainer review.
+
+## Authors' note
+
+This is a draft. Chapters are at varying levels of completeness; see
+the individual chapter headers for status. Errata, corrections and pull
+requests are welcome at the book's repository.

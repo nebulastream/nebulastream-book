@@ -1,0 +1,416 @@
+# Error Handling, Logging, and Observability {#sec-error-handling}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+A streaming engine cannot fail silently. A query that produces
+wrong answers is worse than a query that crashes. NebulaStream
+treats error handling as a first-class concern: there is a
+written design document for it
+(`docs/design/20240711_error_handling.md`), a centralised
+exception list, two assertion macros for invariants, and a
+discipline of distinguishing recoverable errors from bugs.
+
+This chapter walks through the discipline.
+
+---
+
+## 17.1 Bugs vs. errors {#sec-bugs-vs-errors}
+
+The first useful distinction is also the bluntest: some failures
+are bugs (the code is wrong) and some are errors (the world is
+wrong). They warrant different handling.
+
+A **bug** is a violation of an invariant the code maintains. The
+worker dequeued a task whose pipeline weak_ptr was supposed to be
+non-null but is null. The hash map's `getNumberOfTuples` returned
+a value larger than its capacity. These are facts about the code's
+internal consistency that, if violated, mean the code has a defect
+the user cannot work around. The right response is to fail loudly
+and crash; continuing is dangerous.
+
+An **error** is an external condition the code anticipated. The
+file source was given a path that does not exist. A field in the
+input failed to parse as `UINT64`. The TCP source's connection
+dropped mid-stream. These are facts about the world the engine has
+no control over. The right response is to handle them — either
+recover, or report a clean error to the user.
+
+NebulaStream uses different mechanisms for the two:
+
+- **Bugs**: `INVARIANT` and `PRECONDITION` macros. Crash on
+  violation.
+- **Errors**: typed exceptions. Throw on unrecoverable failure;
+  return `std::expected<T, Exception>` or `std::optional<T>` for
+  expected-but-unsuccessful outcomes.
+
+We will see each.
+
+---
+
+## 17.2 The exception list: one file, eighty types {#sec-exception-list}
+
+NebulaStream has a single file that defines every exception type
+it can throw. The file is
+`nes-common/include/ExceptionDefinitions.inc`. Each entry uses an
+`EXCEPTION` macro:
+
+```cpp
+// nes-common/include/ExceptionDefinitions.inc (sketch)
+EXCEPTION(InvalidConfigParameter, 1000, "Invalid configuration parameter")
+EXCEPTION(CannotLoadConfig, 1001, "Cannot load configuration file")
+// ... ~80 more entries ...
+EXCEPTION(InvalidQuerySyntax, 2000, "Invalid query syntax")
+EXCEPTION(UnknownSourceType, 2017, "Unknown source type")
+EXCEPTION(QueryCompilerError, 2032, "Query compiler error")
+EXCEPTION(BufferAllocationFailure, 3000, "Buffer allocation failed")
+EXCEPTION(QueryNotRegistered, 3001, "Query not registered")
+EXCEPTION(ArithmeticalError, 3013, "Arithmetic error")
+EXCEPTION(CannotConnectToCoordinator, 5000, "Cannot connect to coordinator")
+EXCEPTION(InternalErrorAssert, 9000, "Internal error - assertion violated")
+EXCEPTION(FunctionNotImplemented, 9001, "Function not implemented")
+```
+
+Three observations.
+
+**Centralisation.** Every exception is in this file. New
+exception types are added here and only here. The CLAUDE.md
+guideline is explicit: "All exception types defined in a single
+file." This is unusual — most C++ codebases scatter exception
+definitions across translation units — and it is unusually
+useful: you can grep one file to know everything that can go
+wrong.
+
+**Numeric codes by category.** The four-digit codes group
+exceptions by error class. The verified taxonomy as of
+`origin/main` is:
+
+| Range | Count | Category | Representative codes |
+|---|---|---|---|
+| 1XXX | 5 | Configuration | InvalidConfigParameter (1000), CannotLoadConfig (1001) |
+| 2XXX | 38 | Query parsing / compilation | InvalidQuerySyntax (2000), QueryCompilerError (2032), InvalidOptimizerRuleset (2037) |
+| **23XX** | **4** | **Distributed** (sub-block of 2XXX) | PlacementFailure (2300), InvalidTopology (2301), UnknownWorker (2302), DistributedFailure (2303) |
+| 3XXX | 8 | Runtime | BufferAllocationFailure (3000), ArithmeticalError (3013) |
+| 4XXX | 5 | Sources / sinks | CannotFormatSourceData (4000), CannotOpenSink (4004) |
+| 5XXX | 6 | API | QueryNotFound (5000), QueryStatusFailed (5005) |
+| 9XXX | 4 | Internal bugs | FunctionNotImplemented (9000), InvalidDynamicCast (9002) |
+| 9999 / 10000 | 2 | Special | UnknownException, TestException |
+
+**Total: 70 exception types**, all defined in one file. A
+user-visible error message includes the code; an operator
+seeing `error 4004: Cannot open sink` can distinguish "the
+output path is bad" from `error 2300: Placement failure`
+("the ILP solver could not place this query").
+
+The 23XX block is worth calling out separately. Distributed
+deployments (Chapter 19) introduce four error modes — the ILP
+fails, a topology cycle is detected, an unknown worker is
+referenced, or a worker-side failure propagates to the
+coordinator. They live as a sub-block of 2XXX rather than
+their own range because, conceptually, all four are
+"compilation/registration" failures: they happen before or
+during query startup, not during steady-state execution. The
+5XXX network range covers in-flight network errors.
+
+**Structured construction.** The `EXCEPTION` macro generates a
+constructor that supports `fmt::format`-style formatting:
+
+```cpp
+// (Sketch of what EXCEPTION expands to)
+inline Exception InvalidConfigParameter() {
+    return Exception("Invalid configuration parameter", 1000);
+}
+inline Exception InvalidConfigParameter(std::string msg) {
+    return Exception(fmt::format("Invalid configuration parameter; {}\n", msg), 1000);
+}
+template <typename... Args>
+inline Exception InvalidConfigParameter(fmt::format_string<Args...> fmt_msg, Args&&... args) {
+    return Exception(
+        fmt::format("Invalid configuration parameter; {}\n",
+                    fmt::format(fmt_msg, std::forward<Args>(args)...)),
+        1000);
+}
+```
+
+`throw InvalidConfigParameter("port {} is out of range", 99999)`
+produces a message that the caller can format and the user can
+read.
+
+---
+
+## 17.3 INVARIANT and PRECONDITION {#sec-invariant-macros}
+
+For bugs, NebulaStream uses two macros, both in
+`nes-common/include/ErrorHandling.hpp`:
+
+```cpp
+// nes-common/include/ErrorHandling.hpp
+#define INVARIANT(condition, formatString, ...)                                \
+    do {                                                                        \
+        if (!(condition)) {                                                    \
+            auto trace = cpptrace::generate_trace().to_string(true);           \
+            NES_ERROR("Invariant violated: ({}): " formatString "\n\n{}",      \
+                      #condition __VA_OPT__(, ) __VA_ARGS__, trace);           \
+            if (auto logger = ::NES::Logger::getInstance())                    \
+                logger->shutdown();                                            \
+            std::terminate();                                                  \
+        }                                                                      \
+    } while (false)
+```
+
+`INVARIANT(condition, fmt, args…)` checks a condition that should
+be true if the engine's logic is correct. On violation, it
+produces a stack trace via cpptrace, logs at ERROR level, flushes
+the logger, and terminates. There is no recovery path; the engine
+crashes.
+
+`PRECONDITION` is the symmetric macro for function entry: a
+condition the caller is supposed to ensure. Same mechanics, same
+crash-on-violation behaviour.
+
+Both macros are compiled away in `Release` and `Benchmark` builds
+(via `#define NO_ASSERT`). In `Debug` and `RelWithDebInfo`, they
+fire. The reasoning is conventional: production should not pay
+the cost of internal-consistency checks; development should pay
+the cost generously.
+
+::: {.callout-note title="Example 17.1: when INVARIANT fires"}
+A worker thread dequeues a `WorkTask` and locks its weak_ptr
+to a `RunningQueryPlanNode`. The lock fails (returns nullptr).
+The worker logs and drops the task — that is graceful, not a
+bug. But suppose the worker's *own state* says it should have a
+non-null pointer at this point: the worker just locked a
+weak_ptr two lines up and stored the result, and now the result
+is nullptr. That would be:
+
+```cpp
+INVARIANT(strongRef != nullptr,
+          "RunningQueryPlanNode disappeared mid-handler for query {}",
+          task.queryId);
+```
+
+If this fires, something has destroyed the node while a worker
+held a strong reference to it — which the engine's lifecycle
+machinery should make impossible. The crash is correct: the
+alternative is undefined behaviour.
+:::
+
+---
+
+## 17.4 Logging through spdlog {#sec-logging}
+
+NebulaStream uses spdlog [@spdlog] as its logger. Configuration
+lives in
+`nes-single-node-worker/src/SingleNodeWorker.cpp` and the API is
+the standard `NES_TRACE`, `NES_DEBUG`, `NES_INFO`, `NES_WARN`,
+`NES_ERROR` macros. fmt-style formatting is the convention:
+
+```cpp
+NES_INFO("Query {} registered with {} pipelines",
+         queryId, plan.getPipelines().size());
+```
+
+The build-type-aware default log levels (from CLAUDE.md):
+
+| Build type | Default level |
+|---|---|
+| Debug | TRACE |
+| RelWithDebInfo | WARN |
+| Release | ERROR |
+| Benchmark | (no logging) |
+
+The benchmark build strips logging entirely at compile time —
+even an unreached `NES_TRACE` call is gone. This is the right
+choice for performance experiments where each remaining cycle
+matters; it is the wrong default for production debugging, which
+is why production typically uses Release rather than Benchmark.
+
+There is also a custom **GoogleEventTracePrinter** that, when
+enabled, writes Chrome-tracing-compatible JSON for the worker.
+You can drag the resulting trace into `chrome://tracing` and
+visualise the worker's activity at sub-millisecond granularity.
+This is one of the engine's better debugging aids and is a
+standard tool we will use throughout Chapter 21 (benchmarking).
+
+---
+
+## 17.5 Recoverable errors: the std::expected pattern {#sec-expected-pattern}
+
+Some errors are not exceptional in the "should never happen"
+sense — they are routine. The user submits a query that fails to
+parse. A source's file path is wrong. The right response is not
+"throw and unwind", it is "return the error to the caller."
+
+NebulaStream uses `std::expected<T, Exception>` for these cases.
+The query-registration path returns one:
+
+```cpp
+// nes-single-node-worker/src/SingleNodeWorker.cpp (sketch)
+std::expected<QueryId, Exception>
+SingleNodeWorker::registerQuery(LogicalPlan plan) noexcept
+{
+    if (plan.getQueryId() == INVALID_QUERY_ID) {
+        std::uniform_int_distribution<size_t> dist(
+            QueryId::INITIAL,
+            std::numeric_limits<int32_t>::max());
+        plan.setQueryId(QueryId(dist(*idGenerator.wlock())));
+    }
+    auto request = std::make_unique<QueryCompilation::QueryCompilationRequest>(plan);
+    auto result = compiler->compileQuery(std::move(request));
+    // returns std::expected<QueryId, Exception>
+}
+```
+
+The function is `noexcept` and returns either a `QueryId` (success)
+or an `Exception` (a typed error from the exception list). The
+caller decides how to respond — typically by translating the
+exception into a gRPC status code for the client.
+
+This pattern keeps the *normal* flow visible — the function
+signature reads "either I return a QueryId or I report an error"
+— while keeping bugs (which use exceptions or terminate) clearly
+distinct.
+
+---
+
+## 17.6 Distributed failure modes {#sec-distributed-failures}
+
+The four 23XX exception types we catalogued in
+@sec-exception-list cover specific failure shapes the
+distributed layer can produce.
+
+**`PlacementFailure` (2300).** The ILP solver returned no
+feasible solution. Causes: a sink was declared on a worker
+that has no path to the source's worker; a query asks for
+more capacity than any single worker can provide; the user
+declared sources and sinks that the topology cannot connect.
+The exception travels back to the user as a registration error
+(the query never starts).
+
+**`InvalidTopology` (2301).** Adding a worker would create a
+cycle in the DAG. Thrown by `NetworkTopology::addNode` (Chapter
+19). This is a structural violation, not a runtime failure;
+the offending registration is rejected and the catalog stays
+consistent.
+
+**`UnknownWorker` (2302).** The catalog was queried for a host
+that was never registered. Usually a programming error in the
+coordinator code; less commonly, a race between worker
+deregistration and a placement decision that referenced the
+worker. Either way, the engine cannot proceed safely — bare
+hosts have no associated `WorkerConfig`, so it is unsafe to
+guess.
+
+**`DistributedFailure` (2303).** The catch-all for worker-side
+errors that propagate up. A worker reports a runtime exception
+to the coordinator; the coordinator wraps it in a
+`DistributedFailure` carrying the original exception's
+information. The user sees the coordinator's wrapped error;
+the worker's logs carry the original.
+
+What is *not* a 23XX exception: a transient network
+disruption. If a worker becomes unreachable mid-query, the
+coordinator's `DistributedQueryStatusSnapshot` flips
+`hasConnectionException` and the global query status moves to
+`Unreachable` (Chapter 19). This is a state, not an exception
+— the engine does not throw on its own polling.
+
+The asymmetry between "failed loud" (an exception) and "fell
+silent" (`Unreachable`) is intentional. Loud failures are
+problems the engine has identified; silent ones are situations
+the engine cannot conclude about. Forcing the second into the
+first would lose information.
+
+## 17.7 Observability: where to look when something is wrong {#sec-observability}
+
+Practical advice for the reader who has just hit an error in
+NebulaStream:
+
+1. **Check the log first.** The error code in the message lets
+   you grep `nes-common/include/ExceptionDefinitions.inc` for the
+   declaration; the surrounding text usually points at the code
+   path that failed.
+2. **Run with `--logging.level=TRACE`.** TRACE is generous; it
+   logs every task, every pipeline transition, every state
+   change. For non-trivial bugs the answer is somewhere in the
+   trace.
+3. **Run in INTERPRETER mode.** If the bug might be in the JIT,
+   `--worker.default_query_execution.execution_mode=INTERPRETER`
+   removes the entire compilation pipeline and runs the trace
+   directly. If the bug disappears, the bug is in code generation.
+4. **Run with sanitizers.** The CLAUDE.md notes the CI builds
+   matrix includes ASan, UBSan, and TSan. For
+   memory-corruption-shaped bugs, a sanitizer build localises
+   the bug almost instantly.
+5. **Use the Chrome trace.** Enable `GoogleEventTracePrinter` and
+   drag the JSON into `chrome://tracing` for a visual timeline.
+
+The engine has invested visibly in observability. Most stream
+engines' debug stories are worse.
+
+---
+
+## Summary {#sec-ch17-summary}
+
+NebulaStream distinguishes bugs (handled by `INVARIANT`/
+`PRECONDITION` macros that crash on violation) from recoverable
+errors (handled by typed exceptions or `std::expected`). The
+exception list is centralised in a single `.inc` file with
+~80 typed exceptions organised into numeric ranges by category.
+Logging is through spdlog with build-type-aware default levels,
+and an optional Chrome-tracing-compatible event printer for
+visualising worker activity. The discipline is to crash
+forcefully on bug-shaped failures and recover gracefully on
+world-shaped failures, with the line between the two made
+visible by the choice of mechanism.
+
+---
+
+## Reading exercises {#sec-ch17-exercises}
+
+::: {.callout-important title="Reading exercise 17.1: cause an exception"}
+Submit a query with an unknown source type:
+
+```sql
+CREATE PHYSICAL SOURCE FOR demo TYPE InvalidType SET();
+```
+
+You should see an `UnknownSourceType` exception (code 2017).
+Where in the binder is the type validated? Trace through the
+function from the binding error to the user-visible message.
+:::
+
+::: {.callout-important title="Reading exercise 17.2: trip an INVARIANT"}
+Find a place in the codebase that calls `INVARIANT` with a
+condition you can intentionally violate (e.g., a debug-only
+sanity check). In a debug build, modify the surrounding code to
+violate it. Run a query. The engine should crash with a stack
+trace. The exit is intentional and informative — that is the
+whole point of `INVARIANT`.
+:::
+
+::: {.callout-important title="Reading exercise 17.3: chrome tracing"}
+Enable `GoogleEventTracePrinter` (look for the configuration
+option in the worker's startup code). Run a join systest. Drag
+the resulting JSON file into `chrome://tracing`. Identify the
+worker threads, the per-task durations, the gaps between tasks
+(when the worker is idle).
+:::
+
+---
+
+## References {#sec-ch17-refs}
+
+- *Error handling design.*
+  `/Users/zeuchste/git/nebulastream/docs/design/20240711_error_handling.md`.
+- *Exception definitions.*
+  `nes-common/include/ExceptionDefinitions.inc`.
+- *INVARIANT / PRECONDITION.*
+  `nes-common/include/ErrorHandling.hpp`.
+- *spdlog.* G. Melman. *spdlog: Fast C++ logging library.*
+  `https://github.com/gabime/spdlog`.
+- *cpptrace.* J. Robinson. *cpptrace: Simple, portable, and
+  self-contained stacktrace library.*
+  `https://github.com/jeremy-rifkin/cpptrace`.
+- *Chrome trace event format.* Google.
+  `https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU`.

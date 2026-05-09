@@ -1,0 +1,451 @@
+# System Tour: From SQL to Native Code {#sec-system-tour}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+This chapter is a whirlwind tour. By the end of it you should have a
+mental picture of every module in the engine, in the right order, and
+know roughly which chapter to turn to for each. We will not stop to
+explain anything in detail. We are racing through the pipeline from
+SQL text to running native code, in about thirty pages, using a
+single demo query as our chaperone.
+
+The query is the smallest one we can write that exercises the whole
+stack. It comes from the README:
+
+```sql
+CREATE LOGICAL SOURCE demo(value UINT64);
+CREATE PHYSICAL SOURCE FOR demo
+    TYPE File
+    SET('./demo-input.csv' AS `SOURCE`.FILE_PATH,
+        'CSV' AS PARSER.`TYPE`,
+        '\n' AS PARSER.TUPLE_DELIMITER,
+        ',' AS PARSER.FIELD_DELIMITER);
+CREATE SINK result(demo.value UINT64)
+    TYPE File
+    SET('./demo-output.csv' AS `SINK`.FILE_PATH,
+        'CSV' AS `SINK`.OUTPUT_FORMAT);
+SELECT value FROM demo INTO result;
+```
+
+Three DDL statements declare a source, a physical implementation of
+that source, and a sink. The fourth statement is the actual query: a
+trivial projection that copies tuples from `demo` into `result`. It
+has no filter, no join, no window. Anything more complicated would
+double the length of this chapter without changing the structure of
+the tour.
+
+We follow that query through seven stages.
+
+![The seven stages a query passes through, from text to running tasks. Each arrow corresponds to one chapter later in the book.](../figures/tikz/ch02-pipeline.svg){#fig-pipeline width=100%}
+
+Each arrow is one chapter later in the book. Here we will spend
+about three pages per stage, name the key class and file, and move
+on.
+
+---
+
+## 2.1 Stage 1: SQL → AST → bound logical plan {#sec-stage1-parse}
+
+The text of the query enters the engine through `nes-sql-parser/`,
+an ANTLR4-based parser. The grammar lives in
+`nes-sql-parser/AntlrSQL.g4` (about 600 lines). The grammar covers
+the four DDL/DML shapes we need:
+
+- `CREATE LOGICAL SOURCE` — defines a schema by name.
+- `CREATE PHYSICAL SOURCE` — binds an implementation (file, TCP,
+  generator) to a logical source.
+- `CREATE SINK` — defines a sink schema and implementation.
+- `SELECT … INTO` — the query proper.
+
+The parser does the syntactic work; it produces an ANTLR parse tree.
+A second component called the *binder* converts that tree into a
+typed `LogicalPlan`. The binder lives in
+`nes-sql-parser/src/StatementBinder.cpp`. Binding is where the engine
+checks that names resolve, that types make sense, and that the
+schemas of sources and sinks match the projections in the query. The
+output of the binder is a `LogicalPlan` — a typed, validated DAG of
+operators.
+
+A `LogicalPlan` is defined in
+`nes-logical-operators/include/Plans/LogicalPlan.hpp`. Its core is a
+vector of root operators and a query identifier:
+
+```cpp
+// nes-logical-operators/include/Plans/LogicalPlan.hpp
+class LogicalPlan {
+public:
+    explicit LogicalPlan(LogicalOperator rootOperator);
+    explicit LogicalPlan(QueryId queryId,
+                         std::vector<LogicalOperator> rootOperators);
+    [[nodiscard]] QueryId getQueryId() const;
+    [[nodiscard]] std::vector<LogicalOperator> getRootOperators() const;
+    [[nodiscard]] LogicalPlan withRootOperators(
+        const std::vector<LogicalOperator>& operators) const;
+};
+```
+
+For our demo query the binder produces a plan with one root: an
+`InlineSinkLogicalOperator` named `result`, whose child is a
+`SourceDescriptorLogicalOperator` named `demo`. A projection node sits
+between them, but for `SELECT value FROM demo INTO result` the
+projection is the identity, so the optimiser will eliminate it
+shortly.
+
+::: {.callout-note title="Example 2.1: the post-bind plan, in text"}
+The bound plan can be visualised as:
+
+```
+SinkLogicalOperator(name=result, schema={demo$value: UINT64})
+└── SourceDescriptorLogicalOperator(name=demo, schema={demo$value: UINT64})
+```
+
+Two operators, one parent-child edge. Note the `demo$value`
+qualified name: NebulaStream uses `$` to separate the source
+qualifier from the field name. We will see this convention again
+in Chapter 6.
+:::
+
+Chapter 5 covers this stage in full.
+
+---
+
+## 2.2 Stage 2: bound plan → optimised plan {#sec-stage2-optimise}
+
+The bound logical plan goes into the query optimiser, which lives in
+`nes-query-optimizer/`. The entry point is `QueryOptimizer::optimize`,
+defined in `nes-query-optimizer/src/QueryOptimizer.cpp`. The
+optimiser is a sequence of pure-function rules:
+
+```cpp
+// nes-query-optimizer/src/QueryOptimizer.cpp
+LogicalPlan QueryOptimizer::optimize(
+    const LogicalPlan& plan,
+    const QueryOptimizerConfiguration& defaultQueryOptimization)
+{
+    DecideJoinTypesRule joinTypeDecider(defaultQueryOptimization.joinStrategy);
+    DecideMemoryLayoutRule memoryLayoutDecider;
+    constexpr RedundantUnionRemovalRule redundantUnionRemovalRule{};
+    constexpr RedundantProjectionRemovalRule redundantProjectionRemovalRule{};
+    constexpr TypeInferenceRule typeInferenceRule{};
+
+    auto optimizedPlan = LogicalPlan{plan};
+    redundantProjectionRemovalRule.apply(optimizedPlan);
+    redundantUnionRemovalRule.apply(optimizedPlan);
+    typeInferenceRule.apply(optimizedPlan);
+    optimizedPlan = joinTypeDecider.apply(optimizedPlan);
+    optimizedPlan = memoryLayoutDecider.apply(optimizedPlan);
+    return optimizedPlan;
+}
+```
+
+Five rules, applied in sequence. For our demo query:
+
+- `RedundantProjectionRemoval` deletes the identity projection.
+- `RedundantUnionRemoval` does nothing (no unions).
+- `TypeInference` annotates every operator with its input and output
+  schemas.
+- `DecideJoinTypes` does nothing (no joins).
+- `DecideMemoryLayout` chooses row vs. columnar — currently always
+  row, with the columnar path stubbed for future work (Chapter 4).
+
+The optimiser is unusually small for a database engine. There is no
+cost-based optimisation, no plan-space exploration, no statistics.
+Every rule is a syntactic transformation. The reasoning is
+pragmatic: streaming queries are typically short and shallow, and the
+cost of a wrong plan is amortised over the query's lifetime, not
+incurred on each request. We will discuss this trade-off in
+Chapter 9.
+
+---
+
+## 2.3 Stage 3: logical → physical {#sec-stage3-lower}
+
+The optimised logical plan is "what to compute." The physical plan is
+"how to compute it." The conversion happens in
+`nes-query-compiler/`, specifically the `LowerToPhysicalOperators`
+phase. For our demo query, the lowering chooses:
+
+- The source operator becomes a `SourcePhysicalOperator` that produces
+  `TupleBuffer`s by calling into the `FileSource` implementation.
+- The sink becomes a `SinkPhysicalOperator` that consumes
+  `TupleBuffer`s and forwards them to the `FileSink` implementation
+  (which uses a `CSVOutputFormatter`).
+
+The base of the physical operator hierarchy is
+`nes-physical-operators/include/PhysicalOperator.hpp`. Like its
+logical counterpart, it is a C++20 concept rather than a virtual
+class. Every physical operator implements `setup`, `open`, `close`
+and `execute` — the lifecycle methods called during code generation.
+
+::: {.callout-tip title="Real-system reference: how this maps to Flink"}
+Flink also has a logical and physical plan, with similar lowering.
+The visible difference is that Flink's physical plan is the input
+to a Janino-compiled per-operator Java class; NebulaStream's
+physical plan is the input to a tracing JIT. Functionally similar;
+mechanically very different. Chapter 12 covers this gap in detail.
+:::
+
+The physical plan for our demo query has two operators with one
+edge between them. We will look at the physical operator hierarchy
+in detail in Chapter 10.
+
+---
+
+## 2.4 Stage 4: physical plan → pipelined plan {#sec-stage4-pipeline}
+
+A physical plan is a DAG of operators. A pipelined plan is a DAG of
+*pipelines*, where each pipeline is a chain of operators that can be
+fused into a single tight loop and a single chunk of generated
+code. Pipeline boundaries occur at operators that cannot be fused
+through — *pipeline breakers* — most commonly stateful operators like
+hash-join builds, aggregations, and window triggers.
+
+The phase that does this is `PipeliningPhase`, defined in
+`nes-query-compiler/private/Phases/PipeliningPhase.hpp`. For our
+demo query — `Source → Sink` with no breaker between them — the
+result is a single pipeline containing both operators.
+
+```
+Pipeline 1: [SourcePhysicalOperator(demo) → SinkPhysicalOperator(result)]
+```
+
+A more interesting query — say `SELECT count(*) FROM demo GROUP BY
+key` — would produce two pipelines: one ending at the aggregation
+build, and one starting at the aggregation probe. We will see the
+multi-pipeline case in Chapter 11.
+
+---
+
+## 2.5 Stage 5: pipelined plan → compiled plan {#sec-stage5-compile}
+
+The pipelined plan now goes to the JIT. The phase is
+`LowerToCompiledQueryPlanPhase`, in
+`nes-query-compiler/private/Phases/LowerToCompiledQueryPlanPhase.hpp`.
+This is the most complex phase in the engine, and Chapter 12 spends
+its entire length on it. The summary version: each pipeline becomes
+an `ExecutablePipelineStage` produced by tracing through Nautilus,
+which records the pipeline's operations as a sequence of operations
+on `nautilus::val<>` typed values. The resulting trace is lowered
+through MLIR to LLVM IR and JIT-compiled into a function pointer.
+
+The single configuration option that matters here is the execution
+mode:
+
+```cpp
+// nes-query-compiler/private/Phases/LowerToCompiledQueryPlanPhase.cpp
+nautilus::engine::Options options;
+options.setOption("mlir.enableMultithreading", false);
+switch (pipelineQueryPlan->getExecutionMode())
+{
+    case ExecutionMode::COMPILER:
+        options.setOption("engine.Compilation", true);
+        break;
+    case ExecutionMode::INTERPRETER:
+        options.setOption("engine.Compilation", false);
+        break;
+}
+```
+
+Two modes. `COMPILER` produces native code, the default. `INTERPRETER`
+runs the trace as an interpreter, which is much slower but
+incomparably easier to debug — it is the mode you flip to when a
+generated function gives you a wrong answer and you want to see why.
+We will use `INTERPRETER` extensively in this book's reading
+exercises.
+
+The output of this phase is a `CompiledQueryPlan`, defined in
+`nes-executable/include/CompiledQueryPlan.hpp`. It contains the
+compiled `ExecutablePipelineStage`s plus fully-resolved
+`SourceDescriptor`s and `SinkDescriptor`s — everything the worker
+needs to execute, with no further coordinator round-trip.
+
+---
+
+## 2.6 Stage 6: compiled plan → running query {#sec-stage6-run}
+
+The `CompiledQueryPlan` is registered with the query engine
+(`nes-query-engine/`). Registration causes:
+
+1. The engine constructs an `ExecutableQueryPlan` from the
+   `CompiledQueryPlan`. This adds runtime state — counters, callbacks,
+   per-pipeline operator handlers.
+2. The engine wraps each pipeline in a `RunningQueryPlanNode`
+   (defined in `nes-query-engine/RunningQueryPlan.hpp`), which holds
+   a reference count of in-flight `WorkTask`s and a `weak_ptr` for
+   safe cross-thread reference.
+3. Sources are wrapped in `RunningSource` instances (also in
+   `nes-query-engine/`) and started.
+
+Once running, the engine uses the two-queue scheduler we examined
+exhaustively in Chapter 15. To recap: sources push `TupleBuffer`s
+into the bounded admission queue as `WorkTask`s; worker threads pull
+from a logical merge of an unbounded internal queue (preferred) and
+the admission queue (fallback); compiled pipeline functions process
+buffers and emit follow-up `WorkTask`s into the unbounded internal
+queue.
+
+For our demo query, the file source reads `demo-input.csv`, the
+`CSVInputFormatter` parses lines into `TupleBuffer`s, the compiled
+pipeline projects (in this case, copies) the `value` field, and the
+sink's `CSVOutputFormatter` writes the values to `demo-output.csv`.
+End to end, in production execution mode, this is approximately one
+function call per tuple, plus the I/O. The compiled code path has
+the same overhead profile as a hand-written loop with a switch.
+
+---
+
+## 2.7 Putting the modules in order {#sec-modules-overview}
+
+Twenty-three `nes-*` modules on `origin/main`, in roughly the
+order they participate in a query's life:
+
+| Module | Purpose | Chapter |
+|---|---|---|
+| `nes-common` | Identifiers, logging, error macros, exception list | 17 |
+| `nes-configurations` | Engine configuration types | 18 |
+| `nes-data-types` | Schemas, types, fields | 3 |
+| `nes-memory` | TupleBuffer, BufferManager | 3, 4 |
+| `nes-runtime` | Shared runtime utilities | (cross-cutting) |
+| `nes-executable` | `CompiledQueryPlan` and ExecutablePipelineStage | 11, 14 |
+| `nes-sql-parser` | ANTLR4 grammar, statement binding | 5 |
+| `nes-logical-operators` | Logical operator algebra | 6 |
+| `nes-sources` | Source descriptors and registry | 8 |
+| `nes-sinks` | Sink descriptors and registry | 8 |
+| `nes-input-formatters` | Raw bytes → TupleBuffer | 8 |
+| `nes-output-formatters` | TupleBuffer → raw bytes | 8 |
+| `nes-query-optimizer` | Rule-based logical optimisation | 9, 10 |
+| `nes-physical-operators` | Physical operator implementations | 10 |
+| `nes-query-compiler` | Pipelining, lowering to executable | 11 |
+| `nes-nautilus` | JIT, MLIR backend, runtime data structures | 12 |
+| `nes-plugins` | Optional source/sink/operator plugins | 13 |
+| `nes-query-engine` | Task scheduling, runtime, lifecycle | 14, 15 |
+| `nes-distributed` | Distributed plan, worker catalog, network topology | 19 |
+| `nes-network` | Rust+C++ FFI inter-worker channels | 19 |
+| `nes-single-node-worker` | Worker process, gRPC service | 18 |
+| `nes-frontend` | REPL and CLI clients | 18 |
+| `nes-systests` | System-level `.test` file suite | 20 |
+
+Earlier drafts of this book listed 16 modules. That count was
+correct for the pinned commit at the time of writing
+(`cd3ef68c73`, a feature branch) but has been wrong on
+`origin/main` since the distribution layer landed. The two new
+distribution modules (`nes-distributed`, `nes-network`) are the
+subject of Chapter 19. The other modules previously listed under
+"three more directories" — `nes-frontend`, `nes-systests` — are
+now top-level entries. `nes-runtime`, `nes-configurations`, and
+`nes-executable` were always present but were under-described.
+
+Two non-`nes-*` directories complete the picture:
+
+- `grpc/` contains the protobuf service definitions used by
+  the worker (Chapter 18).
+- `cmake/` contains the build helpers, including the plugin
+  registry generator (Chapter 13).
+
+---
+
+## 2.8 What we glossed over {#sec-glossed-over}
+
+We compressed thirty-five pages of careful explanation into one
+chapter. Most of the compression was honest summarisation. Some of
+it was outright omission. For the record:
+
+- The watermark machinery and the four progress identifiers
+  (`OriginId`, `SequenceNumber`, `ChunkNumber`, `Watermark`) do not
+  appear in our demo query at all because there is no window. They
+  appear in essentially every other query. Chapter 7 is dedicated to
+  them.
+- We described JIT compilation in a paragraph. It is the single most
+  consequential design choice in the engine, and Chapter 12 spends
+  its entire length on the tracing approach Nautilus uses.
+- We did not mention error handling. Every stage above can fail.
+  Chapter 17 covers the ~80 named exception types that NebulaStream
+  defines and how `INVARIANT`/`PRECONDITION` macros work alongside
+  them.
+- We did not mention deployment. The whole tour assumed a single-node
+  worker, because that is what NebulaStream currently fully
+  implements. Chapter 19 is honest about what is and is not yet
+  distributed.
+
+If you read this chapter and found a stage opaque, the corresponding
+chapter is the cure. If you read this chapter and found nothing
+opaque, you should probably be reviewing the engine, not reading
+this book.
+
+---
+
+## Summary {#sec-ch2-summary}
+
+A NebulaStream query passes through seven stages: parse, bind,
+optimise, lower, pipeline, compile, run. Each stage is one or two
+modules. Each transformation is a pure function, except the last,
+which spawns running threads. The total time from `nes-repl` accepting
+the SQL to the first tuple landing in the sink is, for a small
+query, on the order of milliseconds — most of it spent in the JIT.
+
+The remaining 21 chapters elaborate one stage at a time. By the end
+of Part IV (Chapter 18), you will have visited every line of code
+this chapter waved at, in roughly twenty times the depth.
+
+---
+
+## Reading exercises {#sec-ch2-exercises}
+
+::: {.callout-important title="Reading exercise 2.1: trace the demo query"}
+Build NebulaStream and submit the demo query from this chapter
+verbatim. Watch the worker log at TRACE level:
+
+```shell
+./cmake-build-debug/nes-single-node-worker/nes-single-node-worker \
+    --logging.level=TRACE
+```
+
+In another terminal, submit the demo query through `nes-repl`. The
+worker log will show the seven stages in order. Identify the lines
+that mark the boundary between each stage. Some are easy to spot
+(the parser logs the SQL); some are subtle (the boundary between
+optimiser and lowering is a single class instantiation).
+:::
+
+::: {.callout-important title="Reading exercise 2.2: compare execution modes"}
+Run a join systest in `INTERPRETER` mode and compare its wall-clock
+time to the same systest in `COMPILER` mode (the default). Choose,
+for example:
+
+```shell
+cmake-build-debug/systest/systest \
+    -t nes-systests/operator/join/JoinMultipleStreams.test:1 \
+    -- --worker.default_query_execution.execution_mode=COMPILER
+cmake-build-debug/systest/systest \
+    -t nes-systests/operator/join/JoinMultipleStreams.test:1 \
+    -- --worker.default_query_execution.execution_mode=INTERPRETER
+```
+
+The interpreter is typically 10–100× slower. Where does the
+overhead come from? Hint: the interpreter walks the same trace the
+compiler emits, but executes each operation through a virtual
+dispatch.
+:::
+
+::: {.callout-important title="Reading exercise 2.3: count the touchpoints"}
+For each of the seven stages, find one class whose name contains the
+stage's verb (Parser, Binder, Optimizer, Lowering, Pipelining,
+Compiler, Engine). Open each in your editor and read its top-level
+header comment. Total time: 15 minutes; total reward: a much
+sharper sense of where chapter boundaries fall.
+:::
+
+---
+
+## References {#sec-ch2-refs}
+
+- *NebulaStream pipeline overview.* In-tree at
+  `/Users/zeuchste/git/nebulastream/CLAUDE.md`, the "Architecture"
+  section.
+- *ANTLR4.* T. Parr. *The Definitive ANTLR 4 Reference*, 2nd ed.,
+  Pragmatic Bookshelf, 2013.
+- *MLIR.* C. Lattner et al., *MLIR: Scaling Compiler Infrastructure
+  for Domain Specific Computation.* CGO 2021.
+- *Hyper.* T. Neumann, *Efficiently Compiling Efficient Query Plans
+  for Modern Hardware.* VLDB 2011.

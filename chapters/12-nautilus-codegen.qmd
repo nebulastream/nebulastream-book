@@ -1,0 +1,450 @@
+# JIT Code Generation with Nautilus and MLIR {#sec-nautilus-codegen}
+
+::: {.callout-note title="Status: deepened 2026-05 against verified code"}
+An earlier draft of this chapter described `nautilus::val<T>`
+generically, without opening the real type. This draft is built
+from a careful read of `nes-nautilus/include/Nautilus/DataTypes/VarVal.hpp`,
+`Record.hpp/.cpp`, and the JIT boundary in
+`nes-runtime/include/Pipelines/CompiledExecutablePipelineStage.hpp`.
+Maintainer review is still recommended for Ch 12 specifically;
+tracing-JIT explanations are unusually easy to get wrong.
+:::
+
+If you remember one thing about NebulaStream, remember this: it
+JIT-compiles every query. There is no interpreter on the hot path
+in production mode; there is no operator-by-operator dispatch; there
+is no virtual function call between operators. The query becomes
+native machine code, and the data flows through that code as fast
+as the hardware can move it.
+
+The framework that makes this happen is called Nautilus. It lives
+in `nes-nautilus/`. This chapter is about how it works.
+
+The mechanism is unusual enough that we will spend a few pages on
+the *idea* before opening any code. Tracing JITs are common in
+managed-runtime worlds (PyPy, V8) but rare in C++ database engines.
+NebulaStream's choice to use one is the most consequential
+architectural decision in the system, and it deserves the careful
+introduction.
+
+---
+
+## 12.1 The problem: why interpret is too slow {#sec-interpret-slow}
+
+Imagine an operator-tree interpreter for the simple query `SELECT
+value FROM demo WHERE value > 0`. The interpreter, for each input
+tuple, walks:
+
+```
+Source → next() → Selection → next() → Projection → next() → Sink
+```
+
+Each `next()` is a virtual function call. Between calls, the
+interpreter has to box and unbox values, dispatch on their types,
+check for nulls. The actual work — comparing `value` to `0` and
+forwarding it — is a fraction of the cost. The rest is interpretation
+overhead.
+
+For OLTP this overhead is fine — a transaction touches a handful
+of tuples and the overhead is negligible per query. For analytical
+workloads over millions of tuples, the overhead is the bottleneck.
+Hyper [@hyper-paper] established that compiling each query into a
+native function eliminates the overhead and yields 10-100x speedups
+on analytical workloads. Every modern analytical engine has followed
+suit: Spark Catalyst, Flink Janino, ClickHouse, DuckDB, Arrow
+Acero, Materialize all compile.
+
+Stream engines need this for the same reason. A 1 MHz stream of
+sensor readings is, over a day, 86 billion tuples. Saving 100 ns
+per tuple in interpretation overhead saves 2.4 hours of CPU time.
+
+---
+
+## 12.2 Two approaches: AST emission vs. tracing {#sec-ast-vs-trace}
+
+Once you have decided to compile, you have two broad choices:
+
+**AST emission.** Each operator emits its own piece of IR (LLVM,
+or some intermediate language) at compile time. The compiler
+strings the operator-emitted pieces together. Each operator is, in
+effect, a code generator that knows how to emit *itself*. This is
+how Hyper, Umbra, and most database codegen frameworks work.
+
+**Tracing.** Each operator is a *normal C++ class* whose `execute`
+method is written as if to be interpreted. The framework runs the
+operator once with special "tracing values" — values that record
+every operation performed on them. The recorded operations form an
+IR. The IR is compiled to native code.
+
+The two approaches differ in where the smarts live. AST emission
+puts the smarts in the operator: each operator knows how to emit
+its own code. Tracing puts the smarts in the framework: operators
+are just C++ that the framework records.
+
+Tracing has a real ergonomic advantage. To add a new operator in
+an AST-emission system, you write code that emits IR — a
+significantly different mental model from writing code that does
+the operation directly. To add a new operator in a tracing system,
+you write code that does the operation, using the framework's
+typed values. The tracing system records what you did and turns it
+into IR for you.
+
+NebulaStream's Nautilus framework uses tracing. This is, to my
+knowledge, the only production-class C++ database engine that uses
+tracing-based codegen. PyPy uses tracing; V8 uses tracing; but
+neither is a database engine.
+
+---
+
+## 12.3 The Nautilus value type: nautilus::val<T> and VarVal {#sec-nautilus-val}
+
+The unit of tracing is `nautilus::val<T>`, a type from the
+external Nautilus library. Wherever an operator would naturally
+use a `T` — a `uint64_t`, a `bool`, a pointer — it uses a
+`nautilus::val<T>` instead. Operations on `nautilus::val<T>`
+look like operations on `T` (the type provides the relevant
+operator overloads), but each operation is recorded into a
+trace.
+
+Inside NebulaStream, the per-field value type is *not*
+`nautilus::val<T>` directly — it is `VarVal`, a thin wrapper
+defined in `nes-nautilus/include/Nautilus/DataTypes/VarVal.hpp`:
+
+```cpp
+// nes-nautilus/include/Nautilus/DataTypes/VarVal.hpp
+template <typename... T>
+using var_val_helper =
+    std::variant<VariableSizedData, nautilus::val<T>...>;
+
+using var_val_t = var_val_helper<
+    bool, uint8_t, uint16_t, uint32_t, uint64_t,
+    int8_t, int16_t, int32_t, int64_t,
+    float, double, char>;
+
+class VarVal {
+    detail::var_val_t value;
+    nautilus::val<bool> null;
+    bool nullable;
+};
+```
+
+`VarVal` is a `std::variant` of `nautilus::val<T>` for every
+primitive type in NebulaStream's type system (Chapter 3), plus
+`VariableSizedData` for the VARSIZED escape, plus a tracing-aware
+`null` flag and a compile-time `nullable` discriminator. The
+choice of variant here is deliberate: at trace time, the
+*concrete* type of a record field is known (the schema fixes
+it), so each operator's read is a `std::get<nautilus::val<T>>`
+rather than a runtime type dispatch.
+
+Read a field: `record.read("value")` returns a `VarVal&`. Branch
+on its value: the `> threshold` comparison is recorded by the
+underlying `nautilus::val<T>::operator>`. Assign: `output.write("value", v)`
+records a memory write.
+
+To the operator author, the code reads like normal C++:
+
+```cpp
+void SelectionPhysicalOperator::execute(
+    ExecutionContext& ctx, Record& record) const
+{
+    auto v = record.read(fieldName);
+    if (v > nautilus::val<uint64_t>(threshold))
+    {
+        consumer->execute(ctx, record);
+    }
+}
+```
+
+To the framework, this is a sequence of trace operations: `read`,
+`gt-const`, `if`, `recursive-execute`, `endif`. The framework
+captures them, lowers to MLIR, and produces native code that
+does exactly what the C++ said.
+
+---
+
+## 12.4 Trace-time vs. runtime constants {#sec-trace-time}
+
+A subtlety the abbreviation glossary in `docs/frequently_used_abbreviations.md`
+flags: there are *trace-time constants* and *runtime values*. A
+trace-time constant is a value known when the trace runs — for
+example, the threshold in a selection predicate is a constant set
+at query compile time. A runtime value is a value known only when
+the compiled code runs — for example, the field of an incoming
+tuple.
+
+Nautilus distinguishes the two. A trace-time constant is folded into
+the generated code; a runtime value becomes a load. The author of an
+operator does not have to think about which is which most of the
+time, because the type system handles it: `nautilus::val<T>` is
+runtime; a plain `T` (or a `nautilus::val<T>` constructed from a
+trace-time constant) is constant-folded.
+
+This is what allows a Selection to be expressed as `if (v >
+threshold)` even though `threshold` differs per query: the
+framework specialises the generated code for the specific
+threshold.
+
+---
+
+## 12.5 The runtime data structures {#sec-runtime-structures}
+
+JIT-friendly data structures matter because the JIT cannot inline
+through a `std::unordered_map`'s virtual implementation. Nautilus
+ships its own.
+
+**`HashMap`.** Defined in
+`nes-nautilus/include/Nautilus/Interface/HashMap/HashMap.hpp`:
+
+```cpp
+// nes-nautilus/include/Nautilus/Interface/HashMap/HashMap.hpp
+class HashMap {
+public:
+    virtual ~HashMap() = default;
+    virtual AbstractHashMapEntry* insertEntry(
+        HashFunction::HashValue::raw_type hash,
+        AbstractBufferProvider* bufferProvider) = 0;
+    [[nodiscard]] virtual uint64_t getNumberOfTuples() const = 0;
+};
+```
+
+A small interface. The hash map is laid out across multiple buffers
+(from the buffer manager), uses linear probing, and exposes a
+single insertion point that the JIT can inline.
+
+**`PagedVector`.** Defined in
+`nes-nautilus/include/Nautilus/Interface/PagedVector/PagedVector.hpp`.
+A dynamically-growing vector backed by a sequence of buffers, with
+a cumulative-sum index for fast random access:
+
+```cpp
+struct PagedVector {
+    struct TupleBufferWithCumulativeSum {
+        explicit TupleBufferWithCumulativeSum(TupleBuffer buffer)
+            : buffer(std::move(buffer)) { }
+        size_t cumulativeSum{0};
+        TupleBuffer buffer;
+    };
+    [[nodiscard]] const TupleBuffer* getTupleBufferForEntry(
+        uint64_t entryPos) const;
+};
+```
+
+`PagedVector` is used wherever an operator needs to accumulate an
+unbounded sequence — the build side of a hash join's collision
+chain, an aggregation's history of tuples per group. Like the
+hash map, it is structured as a collection of `TupleBuffer`s
+because that is what fits naturally with the buffer manager.
+
+**`Record`.** We met this in Chapter 11. It is the per-tuple data
+type; its operations (`read`, `write`) are the ones operators use
+in their `execute` methods.
+
+---
+
+## 12.6 The compile pipeline {#sec-compile-pipeline}
+
+The trace-to-native lowering happens in
+`CompiledExecutablePipelineStage`
+(`nes-runtime/include/Pipelines/CompiledExecutablePipelineStage.hpp`).
+Its `compilePipeline()` method registers a lambda with the
+Nautilus engine; the engine traces the lambda's execution and
+produces a callable function pointer:
+
+```cpp
+// nes-runtime/include/Pipelines/CompiledExecutablePipelineStage.cpp (sketch)
+nautilus::engine::CallableFunction<void, PipelineExecutionContext*,
+                                   const TupleBuffer*, const Arena*>
+CompiledExecutablePipelineStage::compilePipeline() const
+{
+    const std::function<void(
+        nautilus::val<PipelineExecutionContext*>,
+        nautilus::val<const TupleBuffer*>,
+        nautilus::val<const Arena*>)> compiledFunction =
+        [this](nautilus::val<PipelineExecutionContext*> pipelineCtx,
+               nautilus::val<const TupleBuffer*> recordBufferRef,
+               nautilus::val<const Arena*> arenaRef)
+    {
+        auto ctx = ExecutionContext(pipelineCtx, arenaRef);
+        RecordBuffer recordBuffer(recordBufferRef);
+        pipeline->getRootOperator().open(ctx, recordBuffer);
+        // ... per-record loop, close, etc. ...
+    };
+    return engine.registerFunction(compiledFunction);
+}
+```
+
+The `nautilus::val<…>` parameters tell the Nautilus engine
+which arguments to trace; everything captured by `[this]` is
+trace-time-constant. `engine.registerFunction` is the entry
+point into the Nautilus library — it does the trace, lowers
+to MLIR, and returns a callable.
+
+`LowerToCompiledQueryPlanPhase` walks each pipeline and asks
+for a compiled stage. The critical configuration:
+
+```cpp
+// nes-query-compiler/src/Phases/LowerToCompiledQueryPlanPhase.cpp
+std::unique_ptr<ExecutablePipelineStage>
+getStage(const std::shared_ptr<Pipeline>& pipeline)
+{
+    nautilus::engine::Options options;
+    options.setOption("mlir.enableMultithreading", false);
+    switch (pipelineQueryPlan->getExecutionMode())
+    {
+        case ExecutionMode::COMPILER:
+            options.setOption("engine.Compilation", true);
+            break;
+        case ExecutionMode::INTERPRETER:
+            options.setOption("engine.Compilation", false);
+            break;
+    }
+    // ... construct ExecutablePipelineStage with MLIR/Nautilus backend
+}
+```
+
+`ExecutionMode::COMPILER` lowers all the way to native and returns
+a function pointer. `ExecutionMode::INTERPRETER` keeps the trace
+in interpretable form and walks it for each tuple. Both produce
+the *same* answer; the latter is much slower but, because the
+trace is just data, much easier to debug.
+
+The MLIR pipeline is multi-stage: `nautilus::ir` → `mlir-arith` →
+`mlir-llvm` → `LLVM IR` → `native`. Each stage is a lowering pass
+in the LLVM/MLIR sense [@mlir-paper]. The book will not walk
+through the MLIR specifics; that is a topic large enough for its
+own book.
+
+---
+
+## 12.7 What goes wrong, and how the engine is built to handle it {#sec-codegen-debug}
+
+Code generation is the part of the engine where mistakes are
+hardest to debug. A bug in a Selection is a wrong answer. A bug in
+the codegen for a Selection is a wrong answer that depends on the
+phase of the moon and the size of the alignment of an unrelated
+struct.
+
+NebulaStream defends against this in a few ways.
+
+**INTERPRETER mode.** Flipping `execution_mode=INTERPRETER` runs
+the same trace in the interpreter. If the answer differs from the
+COMPILER answer, the bug is in the lowering, not in the operator
+logic. We use this in essentially every reading exercise in this
+book.
+
+**Systests run in both modes.** The CI matrix includes runs with
+and without compilation. A divergence between the two is caught
+automatically.
+
+**Trace dumps.** Setting `mlir.dumpIR` on the engine options
+prints the MLIR for each compiled pipeline. For a one-operator
+pipeline, the IR is a screenful; the human can usually spot
+something obviously wrong.
+
+**The Nautilus team owns the framework.** This is more
+sociotechnical than technical, but it matters. Bugs in Nautilus
+are reported to a small dedicated team that knows the lowering
+pipeline; bugs in operators go to the operator team. The framework
+boundary is also a debugging boundary.
+
+::: {.callout-tip title="Real-system reference: how Hyper does this"}
+Hyper [@hyper-paper], the academic predecessor of Tableau's
+in-memory engine, was the first system to demonstrate the value of
+per-query compilation. Hyper's approach is AST emission: each
+operator emits LLVM IR directly through a builder API.
+
+The operator code in Hyper looks very different from the
+operator code in NebulaStream. Hyper's selection operator emits
+IR; NebulaStream's selection operator does the actual operation
+on `nautilus::val<T>`. For a developer, NebulaStream's tracing
+approach is much closer to writing normal code. For a runtime,
+the resulting native code is comparable.
+
+The cost of tracing — and a real cost — is that the operator
+must be expressible in the tracing language. Operations that
+cannot be traced (e.g., a UDF written as a black-box function
+pointer) require an "extern call" mechanism that is more awkward
+than Hyper's "just call the function" model.
+:::
+
+---
+
+## Summary {#sec-ch12-summary}
+
+NebulaStream's Nautilus framework is a tracing JIT: operators are
+written as normal C++ that uses `nautilus::val<T>` for runtime
+values, and the framework records the operations into a trace,
+lowers through MLIR to LLVM IR, and JIT-compiles to native code.
+The runtime data structures (`HashMap`, `PagedVector`, `Record`)
+are designed for the JIT's inlining requirements. The
+`ExecutionMode::INTERPRETER` flag runs the trace as an
+interpreter, which is much slower but invaluable for debugging.
+The choice of tracing over AST emission is unusual for a C++
+database engine and is the most consequential architectural
+decision in NebulaStream.
+
+---
+
+## Reading exercises {#sec-ch12-exercises}
+
+::: {.callout-important title="Reading exercise 12.1: COMPILER vs INTERPRETER timing"}
+Run a join systest in both modes:
+
+```shell
+cmake-build-debug/systest/systest \
+    -t nes-systests/operator/join/JoinMultipleStreams.test:1 \
+    -- --worker.default_query_execution.execution_mode=COMPILER
+cmake-build-debug/systest/systest \
+    -t nes-systests/operator/join/JoinMultipleStreams.test:1 \
+    -- --worker.default_query_execution.execution_mode=INTERPRETER
+```
+
+Wall-clock time will differ by at least 10×. Verify that the
+results are identical. The interpreter is your trace's source of
+truth; the compiler is your trace's source of speed.
+:::
+
+::: {.callout-important title="Reading exercise 12.2: dump the IR"}
+For a small query, dump the MLIR. The flag is configurable
+through the engine options. Identify the loop body. Identify
+the trace-time constant (`> 0`) being folded. The IR for a
+simple selection should fit on one screen.
+:::
+
+::: {.callout-important title="Reading exercise 12.3: write a one-line operator"}
+Sketch (no need to compile) a `MapPhysicalOperator` that
+multiplies one field by a trace-time constant. The whole class
+should be five lines of `execute`. Compare to the analogous
+operator in a system you know — Spark Catalyst's, Flink's
+Janino-emitted code. The brevity is the point.
+:::
+
+::: {.callout-important title="Reading exercise 12.4: when tracing breaks down"}
+Find a real or imagined operator that you would have a hard time
+expressing through tracing — for example, an operator that calls
+an external library function with side effects. How would you
+shoehorn it into the framework? Hint: extern call mechanisms
+exist; locate one and read its signature.
+:::
+
+---
+
+## References {#sec-ch12-refs}
+
+- *Nautilus interface.* `nes-nautilus/include/Nautilus/Interface/`.
+- *HashMap.*
+  `nes-nautilus/include/Nautilus/Interface/HashMap/HashMap.hpp`.
+- *PagedVector.*
+  `nes-nautilus/include/Nautilus/Interface/PagedVector/PagedVector.hpp`.
+- *Record.* `nes-nautilus/include/Nautilus/Interface/Record.hpp`.
+- *LowerToCompiledQueryPlanPhase.*
+  `nes-query-compiler/private/Phases/LowerToCompiledQueryPlanPhase.hpp`.
+- *Hyper.* T. Neumann. *Efficiently Compiling Efficient Query
+  Plans for Modern Hardware.* VLDB 2011.
+- *MLIR.* C. Lattner et al., *MLIR: Scaling Compiler
+  Infrastructure for Domain Specific Computation.* CGO 2021.
+- *Tracing JITs.* M. Bebenita et al., *Tracing JIT Compilation:
+  Theory and Practice.* PLDI 2009.
+- *PyPy tracing.* C. F. Bolz et al., *Tracing the Meta-Level: PyPy's
+  Tracing JIT Compiler.* ICOOOLPS 2009.

@@ -1,0 +1,317 @@
+# Data Model and Type System {#sec-data-model}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+Every database has, somewhere near its core, a small set of decisions
+about what data looks like. What types are first-class? Are tuples
+mutable? How is a tuple physically laid out in memory? How do
+operators get them? These decisions, made early, ripple through the
+rest of the engine.
+
+NebulaStream's data model is small and deliberate. There are
+fourteen primitive types and one variable-size escape hatch. Tuples
+are immutable. The unit of inter-operator data flow is not a tuple
+but a `TupleBuffer` — a fixed-size, reference-counted batch of
+tuples. There is no schema-on-read; every operator knows the schema
+of every buffer it touches.
+
+This chapter walks through those choices. It is short; the design
+is, mercifully, simple.
+
+---
+
+## 3.1 The type system {#sec-type-system}
+
+The type system is in `nes-data-types/`. The core declaration is in
+`nes-data-types/include/DataTypes/DataType.hpp`:
+
+```cpp
+// nes-data-types/include/DataTypes/DataType.hpp
+struct DataType final {
+    enum class Type : uint8_t {
+        UINT8, UINT16, UINT32, UINT64,
+        INT8, INT16, INT32, INT64,
+        FLOAT32, FLOAT64, BOOLEAN, CHAR,
+        UNDEFINED, VARSIZED,
+    };
+    enum class NULLABLE : uint8_t {
+        IS_NULLABLE, NOT_NULLABLE
+    };
+};
+```
+
+Twelve numeric and boolean primitives. One UNDEFINED sentinel. One
+VARSIZED escape hatch for strings, blobs, and any other variable-
+length payload.
+
+What is conspicuously absent:
+
+- **No DECIMAL.** No fixed-point numbers. If you need them, you put
+  them in a `UINT64` and manage the implicit scale yourself. This is
+  a common simplification in streaming engines; precise numerics rarely
+  pay off in IoT or sensor workloads.
+- **No DATE / TIMESTAMP as distinct types.** Time is encoded as
+  `UINT64` (typically nanoseconds-since-epoch). The `WINDOW(creationTS,
+  SIZE 1 SEC)` syntax we saw in Chapter 1 takes a field of integer
+  type and treats its values as time-stamps.
+- **No nested types — no struct, no array, no map.** A tuple is a
+  flat list of typed fields. If you have a structured payload, you
+  serialise it into a `VARSIZED` field and parse it inside a UDF.
+
+This is a stripped-down, IoT-ready type system. It is also
+honest: every type maps directly to a C++ type with no impedance
+mismatch.
+
+::: {.callout-note title="Example 3.1: from SQL type to C++ type"}
+The DDL `CREATE LOGICAL SOURCE demo(value UINT64)` produces a
+`Schema` with one `Field` named `value` of type `DataType{Type::UINT64,
+NULLABLE::NOT_NULLABLE}`. At code-generation time, every `Record`
+that flows through a pipeline carries `value` as a `nautilus::val<uint64_t>`.
+There is no boxing, no `std::variant`, no virtual dispatch. The
+type system *is* the C++ type system, modulo NULL handling.
+:::
+
+Nullability is a property of every field, encoded in a separate
+enum (`NULLABLE`) rather than baked into the type. This matches the
+SQL convention: a `UINT64 NOT NULL` and a `UINT64` (nullable) share
+the same primitive `Type::UINT64`. The runtime handles NULL via a
+separate bitmap; we will see this pattern in @sec-tuple-buffer.
+
+---
+
+## 3.2 Schemas and fields {#sec-schemas}
+
+A schema is just a sequence of fields plus a memory-layout hint. The
+declaration is in `nes-data-types/include/DataTypes/Schema.hpp`:
+
+```cpp
+// nes-data-types/include/DataTypes/Schema.hpp
+struct Field {
+    Field() = default;
+    Field(std::string name, DataType dataType);
+    std::string name;
+    DataType dataType;
+};
+```
+
+A `Schema` holds a vector of `Field`s and exposes a small interface
+— `getFieldByName`, `getFieldAt`, `contains`, `getSize`. Schemas
+support source qualifiers via the `ATTRIBUTE_NAME_SEPARATOR`
+character `$`. The qualified name `demo$value` distinguishes a
+field `value` originating from source `demo` from a same-named field
+in another source after a join. We saw this in our Chapter 2 demo:
+the sink schema `result(demo.value UINT64)` is shorthand for the
+qualified field `demo$value`.
+
+::: {.callout-note title="Example 3.2: schema in a two-source join"}
+A query joining sources `cars` and `parking` on `cars.id =
+parking.car_id` produces, after the join, a single tuple whose
+schema has both qualifiers visible:
+
+```
+{ cars$id: UINT64, cars$speed: FLOAT64,
+  parking$car_id: UINT64, parking$slot: UINT64 }
+```
+
+The qualified names disambiguate; the engine does not need
+re-naming rules for join outputs because the qualifier is part of
+the field name.
+:::
+
+---
+
+## 3.3 The unit of data flow: TupleBuffer {#sec-tuple-buffer}
+
+Operators do not pass tuples one at a time. They pass `TupleBuffer`s
+— fixed-size memory regions holding a batch of tuples plus
+metadata.
+
+```cpp
+// nes-memory/include/Runtime/TupleBuffer.hpp
+class TupleBuffer {
+    // Reference-counted, header-only wrapper around managed memory.
+    // Move steals ownership; copy increments refcount.
+public:
+    [[nodiscard]] TupleBuffer(TupleBuffer&& other) noexcept
+        : controlBlock(other.controlBlock),
+          ptr(other.ptr),
+          size(other.size)
+    {
+        other.controlBlock = nullptr;
+        other.ptr = nullptr;
+        other.size = 0;
+    }
+};
+```
+
+The `TupleBuffer` is the engine's universal currency. Sources produce
+them. Operators consume them, transform them, produce new ones.
+Sinks consume them and serialise them out. A `TupleBuffer`'s
+size is fixed (default 8 KiB; configurable at engine startup) and
+its layout is dictated by the schema plus the chosen
+`MemoryLayout` (row or columnar; see Chapter 4).
+
+The metadata each `TupleBuffer` carries is the four progress
+identifiers we will meet in Chapter 7:
+
+- `OriginId` — which source originally produced this buffer.
+- `SequenceNumber` — strictly monotonic per origin.
+- `ChunkNumber` — distinguishes multiple buffers produced from one
+  logical sequence event (e.g., a large JSON record split across
+  buffers).
+- `Watermark` — the event-time timestamp.
+
+These four identifiers are the engine's progress contract. Every
+operator can — and many do — reason about them to decide when a
+window has all its data, when a probe is safe to fire, when a sink
+can flush.
+
+::: {.callout-note title="Example 3.3: a TupleBuffer in flight"}
+When the file source in our demo query reads `demo-input.csv`, the
+input formatter produces buffers shaped roughly like:
+
+```
+TupleBuffer {
+    origin = OriginId(1)
+    sequence = SequenceNumber(0)
+    chunk = ChunkNumber(0)
+    watermark = Watermark(<now>)
+    layout = RowLayout
+    schema = Schema{ demo$value: UINT64 }
+    capacity = 8192 bytes
+    numTuples = 1024
+    data = [<8192 bytes containing 1024 little-endian u64 values>]
+}
+```
+
+A worker thread receives this as a `WorkTask`, the compiled
+pipeline reads tuples sequentially, and the projection (in our
+case the identity) re-emits them into a new buffer headed for the
+sink.
+:::
+
+---
+
+## 3.4 Reference counting and lifetime {#sec-refcount}
+
+`TupleBuffer` is reference-counted. The reasoning is operational:
+buffers move freely between threads via the task queue (Chapter 15),
+and dangling pointers across threads are the kind of bug that takes
+weeks to track down. Reference counting moves the cost of safety
+from the programmer to the runtime.
+
+The reference counting is intrusive — the count lives in the
+`controlBlock` of the buffer itself, not in a `std::shared_ptr`
+header — to avoid the double allocation `shared_ptr` would
+otherwise incur. Move steals ownership without bumping the count;
+copy bumps the count; destruction decrements; reaching zero returns
+the buffer to its `BufferManager`.
+
+Buffers can also have child buffers: a `VARSIZED` payload that
+overflows the parent buffer's footprint goes into a child buffer
+with coupled lifetime. Releasing the parent releases the child.
+This matters in practice for strings and JSON payloads, where the
+variable-size content does not fit alongside the fixed-size
+columns.
+
+::: {.callout-tip title="Real-system reference: Flink's MemorySegment"}
+Flink's analogous abstraction is `MemorySegment`, a fixed-size
+chunk of memory borrowed from the `MemoryManager`. The lifetime
+contract is similar; the implementation differs in two ways.
+First, Flink's `MemorySegment` is not reference-counted —
+ownership is unique and explicit, in the JVM's normal sense.
+Second, Flink supports both heap and off-heap segments
+transparently. NebulaStream, being a non-JVM language, does not
+need this distinction: all `TupleBuffer`s come from a pre-allocated
+native pool.
+:::
+
+We will see how `BufferManager` actually gets these buffers
+allocated and recycled in the next chapter.
+
+---
+
+## 3.5 What you can and cannot mutate {#sec-mutability}
+
+Tuples inside a buffer are conceptually immutable to operators. An
+operator that wants to "modify" a tuple — for example, a projection
+that drops a field — produces a *new* tuple in a *new* buffer. The
+old buffer is unchanged.
+
+This is not pedantic immutability. It enables the engine to do two
+things that mutable buffers would forbid. First, a buffer can be
+shared between consumers safely without copy: a fan-out simply
+hands the same buffer to two downstream operators with the
+reference count incremented twice. Second, the JIT can be aggressive
+about read-only assumptions when generating code, since tuples
+inside buffers really are read-only from the operator's perspective.
+
+The cost is that operators that look like in-place transformations
+on paper — `Map`, `Filter` — are actually allocate-and-copy in the
+runtime. The next chapter explains why this is much less expensive
+than it sounds, given the buffer pool design.
+
+---
+
+## Summary {#sec-ch3-summary}
+
+NebulaStream's type system is fourteen primitives plus a variable-
+size escape, with nullability as a separate per-field flag. Schemas
+are vectors of fields with `$`-qualified names supporting source
+disambiguation. Tuples are immutable from the operator's
+perspective and travel in batches inside reference-counted
+`TupleBuffer`s, which carry the four progress identifiers
+(`OriginId`, `SequenceNumber`, `ChunkNumber`, `Watermark`) that the
+rest of the engine uses to reason about progress. The data model
+makes deliberate omissions — no nested types, no decimals, no
+dates — that match the engine's IoT/edge focus.
+
+---
+
+## Reading exercises {#sec-ch3-exercises}
+
+::: {.callout-important title="Reading exercise 3.1: round-trip a type"}
+Run a datatype systest:
+
+```shell
+cmake-build-debug/systest/systest \
+    -t nes-systests/datatype/VariableSizedData.test
+```
+
+The test exercises VARSIZED handling end to end. Pick one
+type and trace it through the engine using `--logging.level=TRACE`:
+where does the type assertion happen on the way in? Where on the
+way out? You should find the inference happens in `TypeInferenceRule`
+inside the optimiser.
+:::
+
+::: {.callout-important title="Reading exercise 3.2: TupleBuffer lifetime"}
+Add an `NES_DEBUG` log statement at the entry and exit of
+`TupleBuffer::TupleBuffer(const TupleBuffer&)` (the copy
+constructor) in `nes-memory/include/Runtime/TupleBuffer.hpp`. Run
+a small windowed query and count how many copies happen per
+processed tuple. The number should surprise you on the low side —
+the engine very rarely copies; it almost always moves.
+:::
+
+::: {.callout-important title="Reading exercise 3.3: invent a type"}
+Suppose you want to add a `DECIMAL(precision, scale)` type to
+NebulaStream. Walk through what would need to change: the enum in
+`DataType.hpp`, the SQL grammar in
+`nes-sql-parser/AntlrSQL.g4`, the type-inference rule in
+`nes-query-optimizer/`, the JIT lowering in `nes-nautilus/`. You
+do not need to implement it; mapping the change is the exercise.
+:::
+
+---
+
+## References {#sec-ch3-refs}
+
+- *NebulaStream type system.* `nes-data-types/include/DataTypes/DataType.hpp`.
+- *NebulaStream Schema.* `nes-data-types/include/DataTypes/Schema.hpp`.
+- *TupleBuffer.* `nes-memory/include/Runtime/TupleBuffer.hpp`.
+- *Flink MemorySegment.* T. Akidau et al., *Streaming Systems*,
+  Chapter on operator state, for a comparable production design.
+- *Reference counting in concurrent runtimes.* J. Boehm. *Atomic
+  Reference Counting and Concurrency.* SPAA 2017.

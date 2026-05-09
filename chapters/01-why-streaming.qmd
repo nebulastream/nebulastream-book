@@ -1,0 +1,346 @@
+# Why Stream Processing? Why Another Engine? {#sec-why-streaming}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+The history of database systems is, in a coarse approximation, a history
+of attempts to deal with data that does not fit. Data that does not fit
+in main memory motivated the buffer manager. Data that does not fit on
+one disk motivated partitioning. Data that does not fit in one
+transaction motivated isolation levels. And data that does not fit
+inside a query — that *arrives*, continuously, while the query runs —
+motivated stream processing.
+
+This is a book about a particular stream processing engine. Before we
+open it up, though, we should be honest about why such engines exist,
+why we keep building new ones, and why NebulaStream is worth a book of
+its own.
+
+---
+
+## 1.1 A short history of streaming engines {#sec-streaming-history}
+
+The first generation of streaming systems were academic. Aurora (2003),
+Borealis (2005) and TelegraphCQ (2003) established that a continuous
+query — a query that runs forever, producing a continuous answer — was
+a coherent mathematical object, not just a hack on top of a relational
+DBMS. They taught us about windowing, watermarks, and what it meant
+for a query to "complete" without ever stopping.
+
+The second generation went into production. Apache Storm (2011),
+later Apache Flink (2015), Apache Spark Streaming (2013) and Kafka
+Streams (2016) brought streaming to industry. They solved the
+operational problems the academic systems left open — checkpointing,
+exactly-once processing, scaling to thousands of nodes, integration
+with the Hadoop and Kafka ecosystems. But they did so under a particular
+set of assumptions: data lived in the cloud, infrastructure was
+elastic, latency budgets were measured in seconds, and the engine was
+written in a JVM language because the surrounding ecosystem was JVM.
+
+The third generation is happening now, and is more diffuse. Materialize
+(2019) showed that incremental view maintenance could be a streaming
+abstraction in its own right. Arroyo and RisingWave brought SQL-first
+streaming with column-oriented internals. ClickHouse and Pinot blurred
+the line between streaming and OLAP. Hyper, Umbra and Velox demonstrated
+that JIT-compiled query execution could be twenty times faster than
+interpreted execution. None of these systems is "the" streaming engine;
+each embodies a different bet about what stream processing should look
+like in 2025.
+
+NebulaStream is one of those bets. It is an academic project — joint
+between BIFOLD, the DIMA Group at TU Berlin and the DFKI IAM Group —
+which means it is both freer to experiment than a production system
+and more accountable to ideas than to revenue. Its bet is that the
+*shape of computation* is changing: data is no longer being produced
+inside data centres and processed in data centres. It is being produced
+at the edge — in factories, in vehicles, in medical devices, in
+agriculture — and the network between the edge and the cloud is the
+expensive part. A streaming engine that takes that seriously will look
+different from one that does not.
+
+---
+
+## 1.2 What NebulaStream optimises for {#sec-nes-vision}
+
+The README opens with an unusually clear thesis statement. We will
+quote it in full because it sets up everything that follows in the
+book:
+
+> NebulaStream is an end-to-end data-management system for cloud-edge-sensor
+> deployments. The platform combines ease of use, extensibility, and
+> efficiency to let teams focus on business logic while the engine
+> optimizes the data path.
+>
+> We advance this vision through five core technologies:
+>
+> - **Heterogeneous Hardware Support** — Targets diverse CPU
+>   architectures and accelerators such as GPUs and TPUs.
+> - **Code Generation** — Compiles every query to efficient native
+>   code for low latency and energy usage.
+> - **In-Network Processing** — Pushes operators toward data sources
+>   to reduce network traffic.
+> - **Adaptive Resource Management** — Reacts to topology or workload
+>   changes without interrupting queries.
+
+Each of these gets at least one chapter in the book. Two need a brief
+preview here, because they shape the engine's design from the very
+top.
+
+**Code generation everywhere.** NebulaStream does not interpret a query
+plan. It compiles the query plan into native machine code, every time,
+through a tracing-JIT framework called Nautilus that lowers to MLIR
+and ultimately to LLVM IR. We will see this in detail in
+@sec-nautilus-codegen. The choice has consequences for almost every
+other design decision: the operator interface looks more like a
+producer/consumer protocol than a class hierarchy, intermediate data
+structures are designed for the JIT (`HashMap`, `PagedVector`) rather
+than the C++ standard library, and the boundary between "query plan"
+and "executable" is a compile step that can take milliseconds and
+returns a function pointer. If you have only ever written queries
+against an interpreter-based engine, this is the single largest
+mental shift the book will ask you to make.
+
+**Cloud-edge-sensor as a first-class deployment target.** Almost every
+streaming engine in production today was designed for the cloud and
+then asked to run at the edge. The result tends to be a JVM heap on a
+Raspberry Pi, which is exactly as awkward as it sounds. NebulaStream
+inverts the question: the edge is the constraint, the cloud is the
+luxury. C++23, no garbage collector, every byte accounted for. This
+shows up in the data model (Chapter 3), where the unit of inter-operator
+data flow is a fixed-size buffer with explicit reference counting, and
+in the buffer manager (Chapter 4), where pre-allocated pools are the
+default rather than dynamic allocation. We will see throughout the
+book how these foundations propagate up the stack.
+
+The other three technologies — heterogeneous hardware, in-network
+processing, adaptive resource management — are partially implemented
+and partially aspirational. We will be honest about which parts of
+the vision are running today and which are research roadmap. The
+distribution story in particular has moved fast: the coordinator
+and inter-worker communication that earlier drafts of this book
+described as "research roadmap" have landed on `origin/main` since
+those drafts were written. Chapter 19 covers what shipped and
+what is still in flight.
+
+---
+
+## 1.3 Why a book on this engine? {#sec-why-this-book}
+
+There is no shortage of textbooks on databases. Garcia-Molina, Ullman
+and Widom's *Database Systems: The Complete Book* is the canonical
+undergraduate text on the relational model, SQL, B-trees, transaction
+processing, and the canonical query optimiser. Petrov's *Database
+Internals* takes the reader on a curated tour of how distributed data
+systems are actually built — storage engines, consensus, replication.
+Kleppmann's *Designing Data-Intensive Applications* sits one level
+above: not "how is X implemented" but "how should I think about X."
+Akidau, Chernyak and Lax's *Streaming Systems* covers the conceptual
+landscape of stream processing — windowing, triggers, accumulation
+modes — at a level any practitioner should have in working memory.
+
+Each of these books leaves the same gap. None of them takes a single
+*specimen* — a single, concrete, modern stream processing engine — and
+walks the reader through it end to end. The closest thing is
+Lions's *Commentary on UNIX 6th Edition*, a book written in 1976 that
+is still in print, because nothing else does for a kernel what Lions
+did. We need a Lions's commentary on a stream engine.
+
+NebulaStream is a good specimen for that purpose, for several reasons.
+
+It is **small enough to fit in a book**: about 876 source files across
+sixteen modules, mostly C++. Production engines like Flink (about
+ten times larger) would need three books to cover at this fidelity.
+
+It is **modern enough to be interesting**: code-generation, MLIR,
+plugin registries, C++20 concepts, statically-linked plugin systems.
+Every chapter has something a reader who knows a different engine
+will not have seen before.
+
+It is **documented well enough to be tractable**: NebulaStream's
+in-tree `docs/design/` and `docs/technical/` directories contain
+substantive design documents that explain *why* a thing works the
+way it does, not just *how*. We will lift heavily from them, with
+attribution, because the team has already done the work of writing
+down the rationale.
+
+And it is **academic enough to be honest about what does not work**:
+production engines bury their workarounds in proprietary commits and
+internal Slack messages. A research engine can — and does — leave
+its scars on the surface. Chapter 15's "the design document says
+continuation, but the live code uses an unbounded queue" is a
+microcosm of the kind of intellectual honesty this book is interested
+in.
+
+---
+
+## 1.4 Who is this book for? {#sec-audience}
+
+Three audiences in roughly decreasing priority:
+
+**Graduate students in systems.** This book sits at the same
+"mezzanine" level as Garcia-Molina/Ullman/Widom: between an
+undergraduate algorithms class and a primary research paper. We
+assume you can read C++, that you have seen relational algebra,
+that you know what a watermark is in principle. We do not assume you
+have built a database. The exercises are designed for self-study and
+for use in a graduate seminar — none require a problem set in the
+traditional sense; all point at real tests inside the engine and ask
+you to run them, observe, and explain.
+
+**Engineers building dataflow systems.** If you are building Flink
+operators, Materialize sources, or your own bespoke streaming
+infrastructure, this book is a tour of one set of choices that you
+might compare your own choices against. Each chapter ends with a
+"Real-system reference" sidebar that places NebulaStream's design
+next to Flink's, Spark's, or Materialize's. The point is not to claim
+NebulaStream is better. The point is to make the design space
+visible.
+
+**NebulaStream maintainers and contributors.** A book by definition
+goes stale; a book pinned to a specific commit goes stale fast. But a
+book that records the *reasoning* behind a system's design is a thing
+the engineers who built that system can hand to a new contributor on
+their first day. If you are about to send your first PR to
+NebulaStream, this book is the long form of "go read the design
+docs" — distilled, cross-referenced, and assembled into a coherent
+narrative.
+
+What this book is **not**: a user manual. We will not teach you the
+SQL you need to express a windowed top-K. The official documentation
+will. We will use SQL extensively as a vehicle for explaining what
+the engine does next, but we will not stop to explain what `GROUP
+BY` means.
+
+---
+
+## 1.5 What the book does not cover {#sec-non-goals-book}
+
+Three deliberate omissions, each motivated.
+
+**Comparative survey.** We compare to Flink, Spark, Materialize,
+Hyper and Arroyo *only* when a comparison illuminates a NebulaStream
+design choice, and *only* in clearly-marked sidebars of half a page
+or less. If you want a comparative survey of stream processing
+engines, Akidau, Chernyak and Lax wrote it.
+
+**Distributed systems theory.** We assume you have at least a
+working knowledge of leader election, linearisability, network
+partitions and CAP. Where NebulaStream's design depends on a
+specific theoretical result, we cite the paper. We do not re-derive
+results that other books — Petrov in particular — have already
+covered in depth.
+
+**Anything outside the engine itself.** The Kubernetes operator,
+the deployment scripts, the cloud integration, the observability
+stack — all useful, none in this book. The line we have drawn is:
+if it is not under `/Users/zeuchste/git/nebulastream/`, it is not in
+scope.
+
+---
+
+## 1.6 Reading order {#sec-dependencies}
+
+The book has 22 chapters in five parts. Most readers will want to
+read Part I (Foundations) in order; thereafter, the chapters are
+mostly independent. The hard dependencies are:
+
+![Reading-order dependencies between the book's five parts. Solid arrows are hard prerequisites; the dashed arrow from Part II to Part V is a soft dependency (Part V's Testing chapter cross-references Part II's data model).](../figures/tikz/ch01-dependencies.svg){#fig-deps width=100%}
+
+If you are interested in code generation, jump to Chapter 12 after
+Part I. If you are interested in scheduling, jump to Chapter 15.
+If you are interested in plugins and how a third party adds a new
+source, Chapter 13 is largely self-contained.
+
+---
+
+## Summary {#sec-ch1-summary}
+
+NebulaStream is a third-generation streaming engine — academic,
+C++23-native, JIT-compiled, designed from the start for the cloud-
+edge-sensor spectrum rather than retrofitted to it. It is small
+enough to dissect in one book, modern enough to be interesting, and
+documented well enough to be tractable. The book uses NebulaStream
+as a single specimen the way an OS textbook uses xv6 or MINIX: not
+because it is the best engine, but because seeing one engine end to
+end is more instructive than seeing five engines half-way each.
+
+The remaining 21 chapters fill in the steps between SQL text and
+running native code, with one chapter per major concern. Chapter 2,
+next, gives the whirlwind tour: a single query, traced through every
+module, in about 35 pages.
+
+---
+
+## Reading exercises {#sec-ch1-exercises}
+
+::: {.callout-important title="Reading exercise 1.1: orient yourself in the repo"}
+Locate the NebulaStream repository, then run:
+
+```shell
+ls /Users/zeuchste/git/nebulastream/ | grep '^nes-'
+```
+
+You should see sixteen `nes-*` directories. Each module has a
+one- or two-line statement of purpose in `CLAUDE.md`. Match each
+module to the part of the book that covers it (this chapter's
+@sec-dependencies diagram is the index).
+:::
+
+::: {.callout-important title="Reading exercise 1.2: find the design documents"}
+Run:
+
+```shell
+ls /Users/zeuchste/git/nebulastream/docs/design/
+```
+
+You should see at least six dated `.md` files. These are the
+in-tree design documents the book cites repeatedly. Pick one and
+read its first page. What problem is it solving? Is the solution
+the one currently in the code, or has the design evolved? (Chapter
+15 walks through one example of design-doc-vs-code drift; you may
+spot more.)
+:::
+
+::: {.callout-important title="Reading exercise 1.3: build it"}
+Follow the README's "Build & Tooling" section to compile NebulaStream.
+The Nix path (`nix run .#clion-setup`) is fastest if you have Nix;
+otherwise the Docker development image is the next-best option. Once
+you have a `cmake-build-debug/` directory, run:
+
+```shell
+ctest --test-dir cmake-build-debug -j --output-on-failure
+```
+
+You should see hundreds of unit tests pass. We will be re-running
+specific tests throughout the book; this exercise just establishes
+that the engine builds for you.
+:::
+
+---
+
+## References {#sec-ch1-refs}
+
+- *Aurora.* D. Carney et al., *Monitoring Streams: A New Class of Data
+  Management Applications.* VLDB 2002.
+- *Borealis.* D. Abadi et al., *The Design of the Borealis Stream
+  Processing Engine.* CIDR 2005.
+- *TelegraphCQ.* S. Chandrasekaran et al., *TelegraphCQ: Continuous
+  Dataflow Processing for an Uncertain World.* CIDR 2003.
+- *Apache Flink.* P. Carbone et al., *Apache Flink: Stream and Batch
+  Processing in a Single Engine.* IEEE Data Engineering Bulletin,
+  2015.
+- *Differential dataflow.* F. McSherry, M. Isard, D. Murray.
+  *Differential Dataflow.* CIDR 2013.
+- *Umbra.* T. Neumann, M. Freitag. *Umbra: A Disk-Based System with
+  In-Memory Performance.* CIDR 2020.
+- *Streaming Systems.* T. Akidau, S. Chernyak, R. Lax. O'Reilly Media,
+  2018.
+- *Database Internals.* A. Petrov. O'Reilly Media, 2019.
+- *Designing Data-Intensive Applications.* M. Kleppmann. O'Reilly,
+  2017.
+- *Database Systems: The Complete Book.* H. Garcia-Molina, J. Ullman,
+  J. Widom. Pearson, 2009.
+- *A Commentary on the UNIX Operating System.* J. Lions. Originally
+  published 1977; reissued as *Lions' Commentary on UNIX 6th Edition*
+  by Peer-to-Peer Communications, 1996.
+- *NebulaStream README.* `nes-common/` and the repo-root `README.md`.

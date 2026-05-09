@@ -1,0 +1,905 @@
+# The Two-Queue Scheduler and Deadlock Avoidance {#sec-two-queue-scheduler}
+
+::: {.callout-note title="Status: complete first draft"}
+This chapter has been drafted end-to-end against NebulaStream commit
+`cd3ef68c73`. It is the smoke-test chapter for the book — the first one
+written, used to validate voice and tooling. Maintainer review pending.
+:::
+
+A stream processing engine is, at its heart, a machine for moving
+tuples between stateful operators. The scheduler decides which operator
+runs next and on which worker thread. Get it wrong and the engine
+either starves under load, livelocks under pressure, or — most
+embarrassingly — deadlocks itself into a frozen process that has to be
+killed and restarted.
+
+In this chapter we open up NebulaStream's scheduler. The structure we
+will examine is, in code, fewer than two hundred lines. The reasons it
+exists, the bugs that pushed it to its current shape, and the trade-offs
+it embodies — those take the rest of the chapter.
+
+We will not start with the solution. We will start with the bug.
+
+---
+
+## 15.1 The problem: a bounded queue and two ways to deadlock {#sec-bounded-queue-problem}
+
+Most production stream engines distribute work across a pool of worker
+threads using a shared task queue. Worker threads dequeue tasks, do
+some work, and emit follow-up tasks back to the queue. Sources also
+emit tasks: when a CSV file source reads a fresh batch of bytes and
+parses it into a `TupleBuffer`, it emits a task instructing some
+downstream pipeline to consume that buffer.
+
+In an idealised version of this design, the queue is unbounded. A task
+is always accepted, the producer never has to wait, and you only need
+to decide on dequeue order. In practice, an unbounded queue is a way
+to crash later. Memory is finite; if a fast source can permanently
+out-produce the workers, the queue grows without bound and the process
+exhausts its address space. The fix, almost reflexively, is to make
+the queue bounded.
+
+Then you have a different problem.
+
+A bounded queue, by definition, can be full. If a producer tries to
+write to a full queue, you have three choices: drop the task, return
+an error, or block the producer until space is available. Stream
+engines almost always choose to block — dropping or erroring would
+break the engine's processing guarantees. Blocking the producer is
+called *backpressure* and it is the right answer. It is also the answer
+that introduces deadlocks.
+
+There are two distinct ways the engine can deadlock against its own
+bounded queue. NebulaStream's design document for the query engine
+calls them P1 and P2 [@nes-task-queue-doc]. We will use the same
+labels.
+
+**P1 — worker-emission deadlock.** A worker thread holding a task
+attempts to emit a follow-up task. The queue is full. The thread
+blocks waiting for capacity. But capacity will only become available
+when *some other worker thread* dequeues a task, finishes it, and
+*emits its own follow-up*. If every worker is in the same
+emit-and-block state, no worker dequeues. The system deadlocks.
+
+This is not a hypothetical scenario. It is what happens during a hash
+join probe, where each input tuple may produce many output tuples; or
+during a window trigger, where firing a window emits a fan-out of
+downstream work. In both cases, a single dequeued task can produce
+many emitted tasks, and the queue can fill from the inside out.
+
+**P2 — source-flooding deadlock.** Sources are not workers. A source
+thread does not dequeue tasks; it only emits them. If the source is
+faster than the workers — say, a high-rate sensor or a Kafka topic
+being replayed at full speed — the source can fill the queue with
+unprocessed tuples faster than the workers drain it. Once the queue is
+full, the source blocks; once the source blocks, no new work enters;
+the workers drain the queue and idle. Then the source unblocks and the
+cycle resumes. This is not a deadlock in the strict sense (the system
+makes progress eventually) but it has two ugly consequences. First,
+the workers cycle between full saturation and complete idleness. The
+throughput of the system is dictated by the queue size and not by the
+hardware. Second — more dangerously — if the worker emits a follow-up
+task while the queue is saturated by source-emitted tasks, the worker
+also blocks. Now we are back in P1.
+
+::: {.callout-note title="Example 15.1: P1 in a hash join probe"}
+Consider a hash join with two input streams `R` and `S`. The build
+side `R` has been hashed into an in-memory hash table. A `WorkTask`
+arrives for `S`: process this 8 KiB batch of `S` tuples. The probe
+finds matches for, on average, 1.7 tuples per input tuple, so the
+batch produces a follow-up batch about 1.7× as large.
+
+The worker dequeues the `S`-side `WorkTask`, performs the probe,
+and now needs to emit a follow-up `WorkTask` for the next operator
+downstream. If every worker thread is in this state — having just
+dequeued an `S` task and trying to emit a probe-result task — and
+the queue is full, no worker can emit and no worker can dequeue.
+That is P1.
+:::
+
+The two problems sound similar but they have different fixes. We will
+solve them separately.
+
+---
+
+## 15.2 Solving P1: do not block the worker on emit {#sec-solving-p1}
+
+The cleanest fix to P1 is to ensure that *worker threads never block
+on emit*. A worker thread that holds work must always be able to make
+progress.
+
+NebulaStream's published design document
+[@nes-task-queue-doc, §Continuation] proposes a technique called
+*continuation*. When a worker fails to write its follow-up task to the
+queue, instead of blocking, the worker swaps: it stuffs its
+unsubmittable task into a thread-local slot and pulls one task off the
+queue to work on next. The next time the worker comes back to its
+slot, the queue may have drained enough to accept the swapped task.
+
+Continuation is elegant. It also has a subtle trap, identified in the
+same design document: some tasks cannot make progress on their own. A
+`PendingPipelineStop` task — which we will examine in detail in
+@sec-pending-pipeline-stop — checks whether a pipeline still has
+references and, if so, *re-emits itself*. If continuation forced the
+worker to take this task off the queue and immediately swap it back,
+the worker would loop without making progress.
+
+The published design proposes a workaround: instead of swapping, the
+worker takes one task off the queue, *replaces* its own task with that
+one, and works on the replacement. The original task gets put back at
+the end of the queue.
+
+::: {.callout-warning title="Caveat: the live code uses a different fix"}
+The design document was written when the internal queue was bounded.
+The current implementation uses an *unbounded* internal queue. The
+worker-emit path therefore cannot fail at all; continuation is no
+longer needed for P1.
+
+You can verify this directly. Open
+`/Users/zeuchste/git/nebulastream/nes-query-engine/TaskQueue.hpp`
+and observe that the internal queue is declared as
+`folly::UMPMCQueue<TaskType, true>` — the U is for unbounded — while
+only the admission queue is `folly::MPMCQueue<TaskType>`. The method
+`addInternalTaskNonBlocking` carries this guarantee in its name, and
+its body has no failure path:
+
+```cpp
+template <typename T = TaskType>
+void addInternalTaskNonBlocking(T&& task)
+{
+    /// The order of operation upholds the invariant. internal is
+    /// unbounded which makes this write always succeed (unless oom)
+    internal.enqueue(std::forward<T>(task));
+    tasksAvailable.release();
+}
+```
+
+This is the engine's actual P1 fix as of `cd3ef68c73`: don't bound
+the queue worker threads write to. We will use this as our reference
+throughout the chapter and note where the design document's
+continuation scheme would still be needed if a future change made the
+internal queue bounded again.
+:::
+
+The choice between an unbounded internal queue and a bounded queue
+plus continuation is a real engineering trade-off, not a settled
+matter.
+
+The unbounded approach buys simplicity. Worker code never needs to
+handle a write failure; emission is a trivial enqueue. It also buys
+correctness for the `PendingPipelineStop` scenario: a self-emitting
+task can simply be appended without any concern about replacing a
+worker's current task.
+
+The cost is that the engine no longer has a hard backpressure surface
+on the worker side. If a query produces a pathological amount of
+internal fan-out — imagine a many-to-many join with no selectivity —
+the internal queue can grow until it crashes the process. In practice
+this is bounded by other constraints: the number of `TupleBuffer`s in
+the pool (we will see why in [Chapter 16](16-stateful-operators.qmd)), the
+selectivity of upstream operators, the rate at which sources can be
+admitted (the next section). NebulaStream's authors have decided that
+those constraints are sufficient. Other engines have decided
+differently; we will see Flink's choice in @sec-reading-order's
+sidebar.
+
+---
+
+## 15.3 Solving P2: a separate admission queue {#sec-solving-p2}
+
+P2 — source-flooding — needs a different fix because it has a
+different cause. The issue is not that producers can block; it is
+that *some kinds of producers should be allowed to block, and others
+should not*. Sources can wait. Worker threads cannot.
+
+NebulaStream's solution is to physically separate the two kinds of
+producers into two queues:
+
+- **`internal`** — the unbounded queue that worker threads emit into.
+  Always accepts a write; never blocks.
+- **`admission`** — a bounded queue that sources, query starts, and
+  query stops emit into. Blocks the producer when full.
+
+Worker threads dequeue from a logical merger of both: the internal
+queue is preferred, the admission queue is fallback. From the worker's
+point of view, there is just one source of work; from the producer's
+point of view, there are two clearly distinct paths with different
+blocking semantics.
+
+The implementation is in `nes-query-engine/TaskQueue.hpp`. Two folly
+queues, one semaphore, three public methods. The whole file is 124
+lines.
+
+```cpp
+// nes-query-engine/TaskQueue.hpp:34-44
+template <typename TaskType>
+class TaskQueue
+{
+    folly::UMPMCQueue<TaskType, true> internal;
+    folly::MPMCQueue<TaskType> admission;
+
+    /// INVARIANT: internal.size() + admission.size() >= tasksAvailable
+    std::counting_semaphore<> tasksAvailable{0};
+    // ...
+};
+```
+
+The line `INVARIANT: internal.size() + admission.size() >=
+tasksAvailable` is the heart of the design. We will return to it in
+@sec-semaphore-invariant.
+
+Three public write/read methods complete the interface:
+
+```cpp
+// nes-query-engine/TaskQueue.hpp:71-94
+template <typename T = TaskType>
+bool addAdmissionTaskBlocking(const std::stop_token& stoken, T&& task);
+
+template <typename T = TaskType>
+void addInternalTaskNonBlocking(T&& task);
+
+std::optional<TaskType> getNextTaskBlocking(const std::stop_token& stoken);
+```
+
+Three methods, three intents. The method names carry the semantics:
+admission is blocking, internal is non-blocking, dequeue is blocking
+with cancellation. There is also a non-blocking dequeue
+(`getNextTaskNonBlocking`) which we will not need in this chapter.
+
+::: {.callout-note title="Example 15.2: P2 in a fast source"}
+A `TCPSource` is connected to a sensor producing a million events
+per second. Each batch of ten thousand events becomes one
+`WorkTask` written into the admission queue. The admission queue
+is sized at, say, four hundred slots.
+
+If the workers can process eight hundred batches per second, the
+queue fills in half a second. The source thread blocks on
+`addAdmissionTaskBlocking`. Meanwhile, the workers continue to
+drain — and crucially, when a worker emits a follow-up task into
+the *internal* queue, that emission still succeeds, because the
+internal queue is unbounded.
+
+The source's blocking has, by design, no effect on worker progress.
+The fast sensor experiences backpressure (its TCP buffer fills, its
+TCP window shrinks, the upstream sensor learns to slow down) but
+the engine is not deadlocked. P2 is solved.
+:::
+
+---
+
+## 15.4 Reading order: who wins the dequeue race {#sec-reading-order}
+
+We have two queues. A worker thread asks for the next task. Which
+queue do we read from?
+
+The simple rule: prefer internal, fall back to admission.
+
+```cpp
+// nes-query-engine/TaskQueue.hpp:47-63
+TaskType readElementAssumingItExists()
+{
+    TaskType task;
+    /// The semaphore guarantees that there is at least one element in
+    /// either one of the queues.
+    if (internal.try_dequeue(task))
+    {
+        return task;
+    }
+
+    /// However, the MPMC `read` can spuriously fail under high contention,
+    /// the alternative `readIfNotEmpty` does not but is significantly
+    /// slower.
+    while (!admission.read(task)) [[unlikely]]
+    {
+    }
+
+    return task;
+}
+```
+
+The internal queue is checked first because it represents *work
+already accepted into the engine*. Tuples currently passing between
+operators have priority over new tuples knocking at the door. This is
+the heart of the deadlock avoidance: a worker that cannot emit is, by
+construction, impossible (the internal queue is unbounded), but if it
+could be impossible, we would still want this read order, because it
+ensures that work-in-progress drains before new work is admitted.
+
+Said differently: this discipline gives priority to old work. If the
+admission queue is overwhelmed, sources will block. If the internal
+queue is overwhelmed, the workers will eventually drain it because
+nothing fights them for it.
+
+::: {.callout-tip title="Real-system reference: how this differs in Flink"}
+Apache Flink uses a different model. Each operator has a fixed pool
+of network buffers (`NetworkBufferPool`) [@flink-buffers]. When an
+upstream operator emits a record, it must obtain a buffer; if no
+buffers are available, it blocks. There is no separate
+"admission" queue: backpressure travels through the operator chain
+itself, and the source naturally blocks because everything between
+it and the source has filled up.
+
+Flink's approach has the virtue of fine-grained, per-pipeline
+backpressure (one slow operator backpressures only its predecessors)
+but is intrinsically more complex: every operator has a buffer
+budget, every emit can block, every operator must be able to
+correctly handle blocking on emit.
+
+NebulaStream's two-queue model is coarser. Backpressure is global to
+the engine, not per-operator. The simplification is the point.
+:::
+
+There is one subtle implementation note in `readElementAssumingItExists`
+that deserves attention: the `while` loop on `admission.read`. The
+loop is annotated `[[unlikely]]` and a comment explains why: the
+folly `MPMCQueue::read` method can spuriously fail under high
+contention even when the queue is non-empty. The semaphore *promises*
+us a task is available; the queue, briefly, lies about it. The
+alternative `readIfNotEmpty` does not lie but is — the comment tells
+us — significantly slower.
+
+This is a textbook example of the kind of trade-off you do not see
+unless you read the actual code. A design document, when summarising,
+will say "we read from the queue." The implementation says "we
+sometimes spin on a contended dequeue because the alternative is too
+slow." Both are true; the second is more useful.
+
+---
+
+## 15.5 The semaphore invariant {#sec-semaphore-invariant}
+
+The invariant printed in the comment on line 40 is doing the heavy
+lifting:
+
+> `INVARIANT: internal.size() + admission.size() >= tasksAvailable`
+
+The sum of the two queue sizes is at least equal to the semaphore
+counter. The semaphore counter is the engine's notion of "how many
+tasks are available right now." That count must never exceed the real
+number of tasks, or a worker thread will be told that work exists when
+in fact it does not, and the worker will spin or fail.
+
+The invariant is upheld by carefully ordering the operations on each
+write path. Both `addAdmissionTaskBlocking` and `addInternalTaskNonBlocking`
+release the semaphore *only after* the task has actually been enqueued.
+On the dequeue side, the worker first acquires the semaphore (blocking
+if the count is zero) and only then attempts to read the task. The
+acquire is the worker's promise that a task exists. The semaphore is
+the only synchronisation between writer and reader visible to the
+queue's API.
+
+This is the kind of invariant that, on paper, is a single line. In a
+production system, it is tested against thousands of randomised
+producer/consumer interleavings. NebulaStream's
+`tests/TaskQueueTest.cpp` exercises this directly with a multi-producer,
+multi-consumer fuzzer that reasons about the order of writes vs. reads
+to expose any window in which the invariant could be violated.
+
+::: {.callout-important title="Reading exercise 15.1: run the queue's own tests"}
+Run the `TaskQueue` unit tests:
+
+```shell
+ctest --test-dir cmake-build-debug -R "TaskQueueTest" --output-on-failure
+```
+
+Open `nes-query-engine/tests/TaskQueueTest.cpp` and identify the
+`Task` type the test uses (a `std::tuple<int, int,
+std::array<std::byte, 142>>`). Why 142? Compare to the real
+`sizeof(NES::Task)` and explain the comment "142 is roughly the
+current task size." Does the queue's behaviour change if the task is
+much larger?
+:::
+
+---
+
+## 15.6 The Task variant: not all tasks are workunits {#sec-task-variant}
+
+We have been speaking as if "task" meant only "process this batch of
+tuples." It does not. The task type is a `std::variant` of eight
+distinct task kinds, defined in `nes-query-engine/Task.hpp:195-203`:
+
+```cpp
+using Task = std::variant<
+    WorkTask,
+    StopQueryTask,
+    StartQueryTask,
+    FailSourceTask,
+    StopSourceTask,
+    PendingPipelineStopTask,
+    StopPipelineTask,
+    StartPipelineTask>;
+```
+
+`WorkTask` is the one we have been discussing: process tuples in a
+specific buffer through a specific pipeline node. The other seven
+control the *lifecycle* of queries, sources and pipelines. They flow
+through the same queue infrastructure as data because the engine has
+chosen to model "stop this pipeline" and "process this tuple" as the
+same kind of event: a thing the worker thread does next.
+
+The choice is unusual. Many engines model lifecycle changes as
+out-of-band signals — a separate control plane, sometimes a separate
+thread. NebulaStream multiplexes them onto the worker queue. The
+benefit is that lifecycle changes are naturally serialised against
+data: a `StopQueryTask` cannot accidentally race with the data it is
+trying to stop, because it is processed by a worker between two data
+tasks. The cost is that lifecycle work blocks behind data work, and
+the engine has to be careful to ensure lifecycle work is not starved.
+
+::: {.callout-note title="Example 15.3: a query stop is just another task"}
+A user submits `STOP QUERY 42`. The frontend translates this into
+a `StopQueryTask` and writes it to the admission queue. The
+admission queue is currently full of `WorkTask`s for query 42. The
+`StopQueryTask` waits.
+
+A worker thread picks up the next admitted task — say, a `WorkTask`
+for query 42. It processes the tuples. Now the worker dequeues
+again, finds the `StopQueryTask`, and runs it: the query catalog is
+consulted, the pipelines are torn down, the sources are signalled
+to stop.
+
+The query stop is naturally serialised behind the work that was
+already in flight. There is no race between "process tuple 9 in
+query 42" and "stop query 42" because they happen on the same
+worker thread, in queue order.
+:::
+
+The most interesting member of the variant — the one that motivates
+the rest of this chapter — is `PendingPipelineStopTask`.
+
+---
+
+## 15.7 Pending pipeline stops: when even two queues are not enough {#sec-pending-pipeline-stop}
+
+Stopping a pipeline gracefully means waiting until no task currently
+references it. Tasks reference pipelines through a `weak_ptr`; the
+pipeline node is `shared_ptr`-owned by the engine, with task-local
+`weak_ptr` references. Until the last task referencing a pipeline has
+run to completion, the pipeline cannot be torn down without risking
+a use-after-free.
+
+The engine therefore models graceful pipeline shutdown as a polling
+task: a `PendingPipelineStopTask` that examines the pipeline's
+reference count, and if any task is still referencing it, *re-emits
+itself* to be checked again later.
+
+This is the task type that broke the simple version of continuation.
+A `PendingPipelineStopTask` cannot make progress on its own; it can
+only make progress as other, unrelated tasks ahead of it in the queue
+finish.
+
+The current implementation handles this with a small backoff
+mechanism. Look at `QueryEngine.cpp:600-625`:
+
+```cpp
+// nes-query-engine/QueryEngine.cpp:608-624
+if (pendingPipelineStop.pipeline->pendingTasks > 0)
+{
+    ENGINE_LOG_TRACE(
+        "Pipeline {}-{} is still active: {}. Seen for {}th time",
+        pendingPipelineStop.queryId,
+        pendingPipelineStop.pipeline->id,
+        pendingPipelineStop.pipeline->pendingTasks,
+        pendingPipelineStop.attempts);
+
+    PendingPipelineStopTask repeatTask(
+        pendingPipelineStop.queryId,
+        pendingPipelineStop.pipeline,
+        pendingPipelineStop.attempts + 1,
+        std::move(pendingPipelineStop.callback));
+    if (pendingPipelineStop.attempts >= PIPELINE_STOP_BACKOFF_THRESHOLD)
+    {
+        pool.delayedTaskSubmitter.submitTaskIn(
+            std::move(repeatTask), PIPELINE_STOP_BACKOFF_INTERVAL);
+    }
+    else
+    {
+        pool.addInternalTask(std::move(repeatTask));
+    }
+    return false;
+}
+```
+
+The pattern is: try the immediate re-enqueue twice; on the third
+attempt, route through a `DelayedTaskSubmitter` that holds the task
+for `PIPELINE_STOP_BACKOFF_INTERVAL` (25 ms, defined two screens up at
+line 70) before re-introducing it. The constants are deliberately
+small. This is not exponential backoff. It is a single hop from "try
+again immediately" to "try again in 25 ms" — enough delay to let the
+admission queue drain a few tasks but not enough to noticeably affect
+shutdown latency.
+
+::: {.callout-note title="Example 15.4: walking through a pipeline stop"}
+A pipeline `P` has three in-flight `WorkTask`s. A `StopQueryTask`
+for `P`'s query arrives; the engine processes it by emitting a
+`PendingPipelineStopTask` for `P`.
+
+The `PendingPipelineStopTask` is dequeued. Worker observes
+`pipeline->pendingTasks == 3`, increments `attempts` to 1, and re-
+emits the task to the internal queue. The task is now behind two
+remaining `WorkTask`s.
+
+Worker dequeues a `WorkTask`, processes it, decrements
+`pendingTasks` to 2. Then dequeues the `PendingPipelineStopTask`
+again. Sees 2 remaining, increments `attempts` to 2, re-emits.
+
+Now `attempts == 2 == PIPELINE_STOP_BACKOFF_THRESHOLD`. The task is
+routed through `DelayedTaskSubmitter` and held for 25 ms. During
+that window, the two remaining `WorkTask`s drain. When the delayed
+task is reinjected, `pendingTasks == 0`, the pipeline is torn down,
+the callback fires.
+:::
+
+A natural question: why a backoff at all? Why not let the
+`PendingPipelineStopTask` repeatedly re-enqueue itself until the
+references drop to zero?
+
+The answer is in the comment immediately above the threshold check
+(`QueryEngine.cpp:614-615`):
+
+> If we have seen this pipeline for the third time, we will add some
+> work from the admission queue to the internal queue. We need to do
+> this, as the pipeline might be stuck in a deadlock as it is waiting
+> for data from a source which has not been moved into the internal
+> queue.
+
+A pipeline that is waiting for data from a source can only get that
+data via the admission queue. If the worker keeps spinning on
+`PendingPipelineStopTask` re-enqueues, no admission-queue task
+will ever advance, because the internal queue keeps refilling itself
+with the same self-emitting task. The 25 ms delay is not just polite;
+it is correctness. It guarantees that the worker's gaze leaves the
+internal queue long enough for a source-emitted task to be promoted.
+
+This is a third deadlock possibility — a sub-case of P1 — that the
+two-queue design alone does not solve. It needs the
+`DelayedTaskSubmitter` as a dedicated escape hatch.
+
+---
+
+## 15.8 Cancellation as a first-class concern {#sec-cancellation}
+
+The two queues block in different ways. The admission queue blocks
+producers when it is full. The dequeue blocks consumers when both
+queues are empty. Either blocking call must be cancellable — the
+engine has to be able to shut down even if every queue is in a
+pathological state.
+
+NebulaStream uses C++20's `std::stop_token` for this, plumbed through
+both blocking methods. Look at the dequeue path:
+
+```cpp
+// nes-query-engine/TaskQueue.hpp:100-111
+std::optional<TaskType> getNextTaskBlocking(const std::stop_token& stoken)
+{
+    while (!tasksAvailable.try_acquire_for(StopTokenCheckInterval))
+    {
+        if (stoken.stop_requested())
+        {
+            return std::nullopt;
+        }
+    }
+
+    return readElementAssumingItExists();
+}
+```
+
+The semaphore is acquired *with a timeout* — `StopTokenCheckInterval`,
+defined as 100 ms. Each timeout, the thread checks the stop token. If
+shutdown has been requested, the method returns an empty optional and
+the worker exits. Otherwise, it tries to acquire again.
+
+The 100 ms interval is the maximum cancellation latency a worker
+thread experiences when it is waiting for work. It is short enough
+that a user-initiated shutdown feels instant. It is long enough that
+the polling cost is invisible: ten checks per second per thread is
+nothing.
+
+The same pattern guards the producer side. `addAdmissionTaskBlocking`
+loops `tryWriteUntil` with the same 100 ms interval, returning
+`false` if the stop token fires before the write succeeds.
+
+```cpp
+// nes-query-engine/TaskQueue.hpp:71-85
+template <typename T = TaskType>
+bool addAdmissionTaskBlocking(const std::stop_token& stoken, T&& task)
+{
+    while (!stoken.stop_requested())
+    {
+        if (admission.tryWriteUntil(
+                std::chrono::steady_clock::now() + StopTokenCheckInterval,
+                std::forward<T>(task)))
+        {
+            tasksAvailable.release();
+            return true;
+        }
+    }
+    return false;
+}
+```
+
+There is one piece of nuance worth remarking on. The dequeue method's
+documentation states: *"The method prioritizes reading over
+cancellation. This implies, if a read is non-blocking, it succeeds
+regardless of the state of the stop token."* That is, a worker that
+finds work available will process it even during shutdown, rather than
+exiting with the work unfinished. This is a design choice in favour of
+draining over abandonment. It pairs naturally with the
+`PendingPipelineStopTask` mechanism: shutdown processes shut down
+gracefully through the same queue, alongside the data they are tearing
+down.
+
+::: {.callout-tip title="Real-system reference: Spark Streaming and graceful stop"}
+Spark Structured Streaming similarly distinguishes "stop now" from
+"stop gracefully" via the `gracefulStop` parameter on
+`StreamingQuery.stop()` [@spark-graceful-stop]. The mechanism differs
+— Spark drains the current micro-batch and then halts — but the
+underlying principle is the same: producers and consumers both need
+a cooperative cancellation signal, and "drain in flight, then
+exit" is almost always the right default.
+
+NebulaStream's choice to model graceful stop as a first-class
+`PendingPipelineStopTask` traveling through the worker queue (rather
+than as out-of-band lifecycle state) makes the draining semantics
+natural to enforce.
+:::
+
+---
+
+## 15.9 Putting it together: the worker loop {#sec-worker-loop}
+
+We have now seen all the pieces. Let us assemble them into a single
+mental model of the worker loop.
+
+![The worker thread loop. The wait at top is bounded by `StopTokenCheckInterval` (100 ms) so cancellation has bounded latency. Every code path eventually returns to the wait, except the `Worker exits` exit on shutdown.](../figures/tikz/ch15-worker-loop.svg){#fig-worker-loop width=90%}
+
+Each loop iteration does at most one of: (a) acquire and process a
+single task, (b) time out and check for shutdown. There is no
+spinning, no polling, no busy work between tasks. The only place a
+worker thread waits is on `tasksAvailable.try_acquire_for`, and that
+wait is bounded by `StopTokenCheckInterval`.
+
+Source threads and external producers run a parallel loop with a
+different shape: they emit tasks via `addAdmissionTaskBlocking` and
+their throughput is bounded by the admission queue's capacity.
+
+The two loops meet at one point: the semaphore. The semaphore is the
+only piece of synchronisation that workers and producers share. The
+queues themselves are lock-free (folly's MPMC and UMPMC are both
+implemented atop atomics, with no mutexes on the hot paths). The
+combination — lock-free data structures synchronised by a counting
+semaphore that doubles as a cancellation point — is what gives the
+scheduler its blend of low overhead and clean shutdown semantics.
+
+::: {.callout-tip title="Real-system reference: Materialize and timely dataflow"}
+Materialize is built on differential dataflow [@differential-dataflow],
+which uses a fundamentally different scheduling model: a *frontier*
+of timestamps that operators advance cooperatively, with no central
+queue. Each worker thread owns a slice of the operator graph and
+runs operators round-robin against their pending work.
+
+Timely dataflow's strength is fine-grained progress reasoning;
+NebulaStream's strength (with its central two-queue scheduler) is
+operational simplicity. The two designs sit on opposite ends of the
+"how distributed should the scheduler itself be" spectrum.
+:::
+
+---
+
+## 15.10 What this design does not do {#sec-non-goals}
+
+It is worth being explicit about what the two-queue scheduler does
+*not* attempt.
+
+**It does not prioritise tasks.** The design document is explicit on
+this point [@nes-task-queue-doc, §Scope]: "It does not perform any
+prioritization of tasks in terms of latency or throughput, but
+prevents deadlocks." A latency-sensitive query and a throughput-
+oriented query share the same queue and are processed in arrival
+order. If a future version of the engine wants per-query scheduling
+policies, the queue infrastructure will need to be replaced or
+augmented; the current design is silent on the question.
+
+**It does not implement work stealing in the strict sense.** Work
+stealing, as in Cilk or Tokio's multi-threaded executor, gives each
+worker a private deque and lets idle workers steal from busy ones'
+deques. NebulaStream has a single shared queue (well, two), and
+workers race to dequeue from it. The behaviour is similar — idle
+workers always pick up available work — but the mechanism is
+classical shared-queue work distribution, not work stealing.
+
+**It does not model per-pipeline backpressure.** As we saw in the
+Flink sidebar, some engines push backpressure through the operator
+graph itself. NebulaStream's backpressure is global: when the
+admission queue is full, *all* sources block, regardless of which
+pipeline is the bottleneck. A slow downstream operator backpressures
+fast upstream sources, but only because the workers are busy and
+cannot drain fast enough — there is no targeted signal to throttle a
+specific source. This is fine for the engine's current scale; if
+NebulaStream grows to thousands of concurrent queries with very
+heterogeneous resource needs, it will likely need a more discriminating
+mechanism.
+
+**It is per-worker, not cross-worker.** Each NebulaStream worker
+has its own pair of queues and its own pool of worker threads.
+In a distributed deployment (Chapter 19), task scheduling is
+local to each worker; the network channels between workers are
+the only inter-worker coordination, and they speak in
+`TupleBuffer`s, not in `Task`s. Backpressure across workers
+travels through the network channels (Chapter 19's
+`backpressure{Upper,Lower}Threshold` settings) rather than
+through the task queue. This is one of the cleaner consequences
+of the decomposition strategy: a per-worker scheduler has no
+global state to share, which is exactly what makes adding more
+workers a question of "spin one up" rather than "reconfigure
+the scheduler."
+
+These are deliberate non-goals. The two-queue design is, by C++
+standards of fanciness, almost embarrassingly modest. Two folly
+queues. One semaphore. One stop token. About two hundred lines of
+code, including tests. The lesson is not that the scheduler is small
+because the problem is small. The lesson is that the scheduler is
+small because the problems it does not solve are handled elsewhere —
+the buffer manager handles memory pressure, the optimiser handles
+operator placement, the source registry handles source-specific
+backpressure. The scheduler does one thing: it gets work to workers
+without deadlocking.
+
+---
+
+## Summary {#sec-summary}
+
+A bounded shared task queue is the natural starting point for a
+scheduler in a stream processing engine, but it leaves you with two
+deadlock surfaces: worker-emission deadlock (P1) and source-flooding
+deadlock (P2).
+
+NebulaStream solves them with a structural separation: two queues,
+each with different blocking semantics. The internal queue is
+unbounded and never blocks a worker on emit, eliminating P1. The
+admission queue is bounded and blocks producers, providing the
+backpressure that keeps the engine from running out of memory while
+preventing source floods from starving worker emissions, eliminating
+P2. The two queues are unified for the worker via a
+`std::counting_semaphore` whose count is the engine's authoritative
+notion of "work available."
+
+Cancellation is layered on top of both blocking calls via a 100 ms
+poll on a `std::stop_token`, which gives shutdown a bounded latency
+without measurable steady-state cost.
+
+A subtle third failure mode — a self-emitting `PendingPipelineStopTask`
+that monopolises the internal queue — is handled by a small backoff
+mechanism that routes the task through a `DelayedTaskSubmitter`
+after two failed attempts, ensuring source-emitted work in the
+admission queue gets a chance to advance.
+
+The design is deliberately minimal. Per-task prioritisation, per-pipeline
+backpressure, and work stealing are all deferred to other parts of the
+engine or to future work. What is left is small, fast, and — most
+important — provably free of the two deadlock surfaces that motivated
+its existence.
+
+---
+
+## Reading exercises {#sec-exercises}
+
+::: {.callout-important title="Reading exercise 15.1: invariant under load"}
+Run `TaskQueueTest`'s multi-producer/multi-consumer fuzzer:
+
+```shell
+ctest --test-dir cmake-build-debug -R "TaskQueueTest" \
+    --output-on-failure
+```
+
+Read `nes-query-engine/tests/TaskQueueTest.cpp`. The test uses
+a synthetic `Task` of size 142 bytes. Modify the test to use a
+task of size 16 bytes and another of size 4096 bytes. Does the
+invariant `internal.size() + admission.size() >= tasksAvailable`
+still hold under contention? Use ThreadSanitizer
+(`-DCMAKE_BUILD_TYPE=Debug` with `-DNES_USE_SANITIZER=thread`) and
+look for any reported races.
+:::
+
+::: {.callout-important title="Reading exercise 15.2: P1 simulation"}
+Modify a copy of `TaskQueue.hpp` to make the internal queue
+*bounded* (replace `folly::UMPMCQueue` with `folly::MPMCQueue<TaskType>`
+of, say, capacity 16). Make `addInternalTaskNonBlocking` return
+`bool` and have it fail when full. Run the existing test suite. How
+many tests fail? What pattern do the failures show? You should not
+attempt to make the code "work" — the goal is to feel the deadlock
+that the unbounded design prevents.
+:::
+
+::: {.callout-important title="Reading exercise 15.3: pending pipeline stop in flight"}
+Run a multi-stream join systest with `ENGINE_LOG_TRACE` enabled
+and grep for `Pipeline ... is still active: ... Seen for ...th
+time` in the log. How often, in a typical join with multiple
+input streams, is a `PendingPipelineStopTask` re-emitted before
+the pipeline can be stopped? What does that number tell you
+about the typical fan-out of the join probe?
+
+```shell
+cmake-build-debug/systest/systest \
+    -t nes-systests/operator/join/JoinMultipleStreams.test:1 \
+    -- --worker.default_query_execution.execution_mode=INTERPRETER
+```
+
+Inspect the resulting log file under `cmake-build-debug/systest-run`.
+:::
+
+::: {.callout-important title="Reading exercise 15.4: cancellation latency"}
+Start `nes-single-node-worker` and submit a long-running query
+via `nes-repl`:
+
+```shell
+cmake-build-debug/nes-single-node-worker/nes-single-node-worker
+# in another terminal
+cmake-build-debug/nes-frontend/apps/repl/nes-repl -s localhost:8080 \
+    < a-long-query.sql
+```
+
+Send `SIGINT` to the worker. Measure the time between the signal
+and process exit using `time`. Where does the delay come from?
+Identify the wait that dominates the latency (hint: it is bounded
+by `StopTokenCheckInterval` per blocked thread). What would you
+have to change to bring it below 10 ms?
+:::
+
+::: {.callout-important title="Reading exercise 15.5: replace the semaphore"}
+The `TaskQueue` uses a `std::counting_semaphore` to coordinate
+producers and consumers. Could you replace it with a condition
+variable and a counter? Sketch the implementation. What invariants
+become harder to maintain? What additional state do you need? Why
+might the authors have preferred the semaphore?
+:::
+
+---
+
+## References {#sec-references}
+
+This chapter draws on:
+
+- **NebulaStream design document.** *Task Queues in the Query Engine.*
+  In-tree at `docs/technical/QueryEngine_TaskQueue.md`. The originator
+  of the P1/P2 framing used throughout this chapter.
+
+- **NebulaStream source.** Commit `cd3ef68c73`. Specifically:
+
+  - `nes-query-engine/TaskQueue.hpp`
+  - `nes-query-engine/Task.hpp`
+  - `nes-query-engine/QueryEngine.cpp` (the worker loop and
+    `PendingPipelineStop` handling around line 600)
+  - `nes-query-engine/Callback.hpp`
+  - `nes-query-engine/DelayedTaskSubmitter.hpp`
+  - `nes-query-engine/tests/TaskQueueTest.cpp`
+
+- **Folly.** F. Bachrach et al. *Folly: Facebook open-source library*.
+  `folly::MPMCQueue` and `folly::UMPMCQueue` are the underlying queue
+  primitives. See `https://github.com/facebook/folly`.
+
+- **Flink network buffers.** F. Hueske and V. Kalavri.
+  *Stream Processing with Apache Flink*, 1st ed. O'Reilly Media, 2019,
+  ch. 9, "Implementing Streaming Data Pipelines."
+
+- **Spark Structured Streaming graceful stop.** M. Armbrust et al.
+  *Structured Streaming: A Declarative API for Real-Time Applications
+  in Apache Spark.* SIGMOD 2018.
+
+- **Differential and timely dataflow.** F. McSherry, M. Isard, D. Murray.
+  *Differential Dataflow.* CIDR 2013. And: D. Murray, F. McSherry et al.
+  *Naiad: A Timely Dataflow System.* SOSP 2013.
+
+- **C++20 stop token.** ISO/IEC 14882:2020. The `std::stop_token` and
+  `std::counting_semaphore` types are from
+  `<stop_token>` and `<semaphore>` respectively.
+
+- **Continuation-style scheduler design.** As proposed in
+  NebulaStream's design document (above). Note that the technique was
+  superseded by the unbounded internal queue in the current
+  implementation; the technique remains relevant if the queue is
+  ever rebounded.
+
+- **Variant-based task representation.** N. Josuttis. *The C++ Standard
+  Library*, 2nd ed. Addison-Wesley, 2012, ch. 5 ("Utilities") for the
+  general mechanics of `std::variant` and `std::visit`.

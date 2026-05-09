@@ -1,0 +1,280 @@
+# Physical Lowering and Operator Choice {#sec-physical-lowering}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+A logical operator says *what* to compute. A physical operator says
+*how*. The distinction matters because there is usually more than
+one way: a join can be hash or nested-loop; an aggregation can be
+key-grouped or globally streamed; a memory layout can be row or
+columnar. Lowering is the engine's commitment to a particular
+*how*.
+
+In NebulaStream, lowering is a phase in `nes-query-compiler/`
+called `LowerToPhysicalOperators`. It runs after optimisation and
+before pipelining. By the time it finishes, every logical operator
+has been replaced by an instance of a physical operator class
+that knows how to participate in code generation.
+
+---
+
+## 10.1 The physical operator concept {#sec-physical-concept}
+
+Physical operators, like logical operators, are defined through a
+C++20 concept rather than a class hierarchy. The concept lives in
+`nes-physical-operators/include/PhysicalOperator.hpp`:
+
+```cpp
+// nes-physical-operators/include/PhysicalOperator.hpp
+template <typename T>
+concept PhysicalOperatorConcept = requires(T op) {
+    { op.setup(...) };
+    { op.open(...) };
+    { op.execute(...) };
+    { op.close(...) };
+};
+```
+
+Four lifecycle methods, executed during code generation:
+
+- **`setup`** — called once at compile time. Allocates per-operator
+  state, registers handlers.
+- **`open`** — called at the start of each pipeline invocation.
+  Initialises per-invocation state.
+- **`execute`** — called once per `Record`. The hot path. Most of
+  the actual work happens here.
+- **`close`** — called at the end of each pipeline invocation.
+  Flushes anything pending.
+
+These look like a standard producer/consumer protocol because they
+are. NebulaStream's physical operators are essentially Volcano-
+style operators with the per-tuple `next()` replaced by a per-batch
+`execute(Record)` and the whole protocol expressed at code-
+generation time rather than at runtime.
+
+---
+
+## 10.2 The physical operator catalogue {#sec-physical-catalogue}
+
+The classes live in `nes-physical-operators/include/`. The major
+ones:
+
+| Logical operator | Physical implementations |
+|---|---|
+| Source | `SourcePhysicalOperator` |
+| Sink | `SinkPhysicalOperator` |
+| Selection | `SelectionPhysicalOperator` |
+| Projection | `ProjectionPhysicalOperator` |
+| Map | `MapPhysicalOperator` |
+| Join (hash) | `HJBuildPhysicalOperator` + `HJProbePhysicalOperator` |
+| Join (nested-loop) | `NLJBuildPhysicalOperator` + `NLJProbePhysicalOperator` |
+| Aggregation | `AggregationBuildPhysicalOperator` + `AggregationProbePhysicalOperator` |
+
+A few observations.
+
+Stateful operators come in pairs — a *build* operator that
+accumulates state, and a *probe* operator that emits results. The
+two halves run on different sides of a pipeline boundary (Chapter 11)
+and communicate through a shared state structure registered during
+`setup`. This is the classical streaming-join pattern.
+
+Stateless operators are single classes. A `Selection` is just an
+`execute` that calls a predicate; if the predicate returns true,
+the record passes; if false, it is dropped.
+
+A `Map` is a pure transformation per field; the implementation is a
+thin wrapper that, at code-generation time, emits the field-by-field
+arithmetic.
+
+---
+
+## 10.3 The lowering rule registry {#sec-lowering-registry}
+
+Lowering itself is implemented as a *rule registry*. Each logical
+operator type has a corresponding lowering rule registered in
+`LoweringRuleRegistry`. The rule's job is to take a logical operator
+plus context and return a physical operator (or, for stateful
+operators, a pair).
+
+The dispatch is in `LowerToPhysicalOperators.cpp`:
+
+```cpp
+// nes-query-compiler/src/Phases/LowerToPhysicalOperators.cpp
+std::unique_ptr<AbstractLoweringRule>
+resolveLoweringRule(const LogicalOperator& logicalOperator,
+                    const LoweringRuleRegistryArguments& registryArgument)
+{
+    if (logicalOperatorName == "Join")
+    {
+        const auto implementationTraitOpt
+            = getTrait<JoinImplementationTypeTrait>(traitSet);
+        switch (implementationTrait->implementationType)
+        {
+            case JoinImplementation::HASH_JOIN:
+                return LoweringRuleRegistry::instance()
+                           .create("HashJoin", registryArgument);
+            case JoinImplementation::NESTED_LOOP_JOIN:
+                return LoweringRuleRegistry::instance()
+                           .create("NLJoin", registryArgument);
+        }
+    }
+    // ... generic case for other operators
+}
+```
+
+For a join, the dispatch reads the `JoinImplementationTypeTrait`
+attached by `DecideJoinTypesRule` (Chapter 9) and selects the
+appropriate physical operator factory by name. For other operators
+the dispatch is a single-name lookup.
+
+The registry is the same plugin pattern we will see in detail in
+Chapter 13. Its presence here means a third party can add a new
+join implementation — say, an interval-join algorithm — by
+registering a lowering rule named "IntervalJoin" and updating the
+optimiser's join-type decision to choose it. The framework is not
+locked.
+
+---
+
+## 10.4 The hash-join lowering, in detail {#sec-hash-join-lower}
+
+A `JoinLogicalOperator` whose trait says `HASH_JOIN` lowers into
+*two* physical operators:
+
+```cpp
+// nes-physical-operators/include/Join/HashJoin/HJBuildPhysicalOperator.hpp
+class HJBuildPhysicalOperator : public StreamJoinBuildPhysicalOperator {
+public:
+    HJBuildPhysicalOperator(
+        OperatorHandlerId operatorHandlerId,
+        JoinBuildSideType joinBuildSide,
+        std::unique_ptr<TimeFunction> timeFunction,
+        const std::shared_ptr<TupleBufferRef>& bufferRef,
+        HashMapOptions hashMapOptions);
+    void setup(ExecutionContext& executionCtx,
+               CompilationContext& compilationContext) const override;
+    void execute(ExecutionContext& ctx, Record& record) const override;
+};
+```
+
+The build operator accepts records from one side of the join and
+inserts them into a hash map keyed on the join key. The probe
+operator accepts records from the other side and looks them up,
+emitting joined records on each match.
+
+The hash map itself is one of the runtime data structures from
+`nes-nautilus/`, a JIT-aware container we will examine in Chapter 12.
+For now, note that the build's `setup` method registers a handler
+that owns the hash map; both build and probe share access to it
+through an `OperatorHandlerId`.
+
+The pair-of-operators pattern is also how the build/probe split
+introduces a *pipeline boundary*: the build is on one pipeline,
+the probe on another, with the hash map mediating between them.
+That is the Chapter 11 story.
+
+---
+
+## 10.5 Aggregation: same structure, different state {#sec-aggregation}
+
+Aggregations also lower into a build/probe pair. The build inserts
+records into a hash map keyed on the grouping key (or, for global
+aggregations, into a single accumulator). The probe walks the hash
+map after each window fires and emits one record per group.
+
+The interesting difference from joins is that the aggregation's
+hash map values are *partial aggregates*, not records. For
+`AVG(speed)`, the value is `(sum, count)`; for `MAX(value)` it is
+the running maximum. The aggregation function knows how to
+combine a partial aggregate with an incoming value (the
+`combine` step) and how to convert a partial aggregate into a
+result tuple (the `extract` step).
+
+The actual aggregation classes are in
+`nes-physical-operators/include/Aggregation/`. The aggregation
+function vocabulary is in
+`nes-logical-operators/include/Operators/Windows/Aggregations/` —
+SUM, COUNT, MIN, MAX, AVG, plus a generic UDF aggregation slot.
+
+---
+
+## 10.6 What is *not* in the lowering phase {#sec-lower-non-goals}
+
+Several decisions feel like they ought to belong here but do not.
+
+**Code generation** belongs to the next two phases (pipelining,
+then JIT). The lowering phase produces physical operator
+*objects*; it does not generate any code. The objects expose
+methods that the JIT calls.
+
+**Memory allocation** belongs to setup-time bookkeeping in the
+runtime, driven by physical operators but not allocated by the
+lowering rules. The lowering rule says "this build operator will
+need a hash map of size approximately N"; the runtime allocates
+when the query starts.
+
+**Parallelism decisions** also do not happen here. Whether to
+parallelise the join across multiple worker threads is decided at
+runtime by the task scheduler (Chapter 15), not at lowering time.
+
+The lowering phase's scope is narrow: pick a class, instantiate it
+with the right configuration, hand it to the next phase.
+
+---
+
+## Summary {#sec-ch10-summary}
+
+The lowering phase rewrites a logical plan into a physical plan by
+replacing each logical operator with one or more physical
+operators. The dispatch is through a `LoweringRuleRegistry`,
+selecting an implementation by name and (for joins) by trait.
+Stateful operators (joins, aggregations) lower into a build/probe
+pair that share state through an `OperatorHandlerId`. Stateless
+operators lower one-to-one. The phase is small (about a dozen
+rules) and largely mechanical; the interesting decisions —
+physical join type, memory layout — were already made by the
+optimiser.
+
+---
+
+## Reading exercises {#sec-ch10-exercises}
+
+::: {.callout-important title="Reading exercise 10.1: read a hash-join lowering"}
+Set a breakpoint at the entry of the hash-join lowering rule.
+Submit a hash-join query (any `JoinMultipleStreams.test` will
+do). Inspect the lowered plan: confirm two physical operators
+(`HJBuildPhysicalOperator`, `HJProbePhysicalOperator`) replaced
+the single `JoinLogicalOperator`. What `OperatorHandlerId` was
+chosen? How does it tie the two halves together?
+:::
+
+::: {.callout-important title="Reading exercise 10.2: nested-loop fallback"}
+From Chapter 9's exercise, you have a query with an inequality
+join. Confirm that lowering produces `NLJBuildPhysicalOperator`
+and `NLJProbePhysicalOperator`. Compare the runtime against the
+hash-join case.
+:::
+
+::: {.callout-important title="Reading exercise 10.3: implementation registration"}
+Locate the line(s) that register the HashJoin and NLJoin
+lowering rules in the registry. Compare to the registration
+pattern for the source plugins (Chapter 8). Are they the same
+mechanism? They should be — both use `LoweringRuleRegistry` /
+`SourceRegistry` on top of the static-plugin-registry framework.
+:::
+
+---
+
+## References {#sec-ch10-refs}
+
+- *PhysicalOperator concept.*
+  `nes-physical-operators/include/PhysicalOperator.hpp`.
+- *HJBuildPhysicalOperator.*
+  `nes-physical-operators/include/Join/HashJoin/HJBuildPhysicalOperator.hpp`.
+- *Lowering registry.*
+  `nes-query-compiler/private/Phases/LowerToPhysicalOperators.hpp`.
+- *Volcano operator model.* G. Graefe. *Volcano — An Extensible and
+  Parallel Query Evaluation System.* IEEE TKDE, 1994.
+- *Hash join in streaming.* J. Krämer, B. Seeger.
+  *Semantics and Implementation of Continuous Sliding Window
+  Queries Over Data Streams.* ACM TODS, 2009.

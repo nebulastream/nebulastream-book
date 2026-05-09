@@ -1,0 +1,134 @@
+project:
+  type: book
+  output-dir: _book
+
+book:
+  title: "NebulaStream: A Stream Processing Engine from the Inside Out"
+  subtitle: "Internals of a Modern Cloud-Edge Stream Processing System"
+  author:
+    - name: "TBD"
+      affiliation: "BIFOLD / TU Berlin"
+  date: today
+  date-format: "MMMM YYYY"
+  language: en
+  repo-url: https://github.com/nebulastream/nebulastream-book
+  repo-actions: [edit, issue]
+  search: true
+  reader-mode: true
+  cover-image: figures/neslogo.png
+  favicon: figures/favicon.ico
+  site-url: https://nebula.stream
+  page-footer:
+    left: "© CC BY-SA — code excerpts under Apache-2.0 from NebulaStream"
+    center: "[nebula.stream](https://nebula.stream) · [github](https://github.com/nebulastream/nebulastream)"
+    right: "Built with [Quarto](https://quarto.org)"
+  sidebar:
+    style: docked
+    logo: figures/neslogo.png
+    title: "NebulaStream Internals"
+
+  chapters:
+    - index.qmd
+    - part: "Foundations"
+      chapters:
+        - chapters/01-why-streaming.qmd
+        - chapters/02-system-tour.qmd
+        - chapters/03-data-model.qmd
+        - chapters/04-buffer-management.qmd
+    - part: "The Query Frontier"
+      chapters:
+        - chapters/05-query-language.qmd
+        - chapters/06-logical-algebra.qmd
+        - chapters/07-watermarks.qmd
+        - chapters/08-sources-sinks.qmd
+    - part: "Optimization and Compilation"
+      chapters:
+        - chapters/09-rule-based-optimization.qmd
+        - chapters/10-physical-lowering.qmd
+        - chapters/11-pipelining.qmd
+        - chapters/12-nautilus-codegen.qmd
+        - chapters/13-plugins.qmd
+    - part: "Runtime and Execution"
+      chapters:
+        - chapters/14-task-execution.qmd
+        - chapters/15-two-queue-scheduler.qmd
+        - chapters/16-stateful-operators.qmd
+        - chapters/17-error-handling.qmd
+        - chapters/18-frontends.qmd
+    - part: "Operations and Frontiers"
+      chapters:
+        - chapters/19-distributed-deployment.qmd
+        - chapters/20-testing.qmd
+        - chapters/21-benchmarking.qmd
+        - chapters/22-open-problems.qmd
+    - references.qmd
+  appendices:
+    - appendices/A-build.qmd
+    - appendices/B-conventions.qmd
+    - appendices/C-glossary.qmd
+
+bibliography: references.bib
+# csl: ieee.csl  # add a CSL file later if a specific style is required
+
+format:
+  html:
+    theme:
+      light: [cosmo, theme/nebulastream-light.scss]
+      dark:  [darkly, theme/nebulastream-dark.scss]
+    code-link: true
+    code-fold: false
+    code-line-numbers: true
+    code-copy: true
+    fig-width: 8
+    fig-height: 5
+    fig-cap-location: bottom
+    smooth-scroll: true
+    anchor-sections: true
+    link-external-newwindow: true
+    mermaid:
+      theme: default
+  pdf:
+    documentclass: scrreprt
+    papersize: letter
+    pdf-engine: lualatex
+    keep-tex: true
+    fig-pos: "H"
+    cite-method: biblatex
+    geometry:
+      - top=1in
+      - bottom=1in
+      - left=1.25in
+      - right=1.25in
+    include-in-header:
+      text: |
+        \usepackage{tikz}
+        \usepackage{listings}
+        \usepackage{tcolorbox}
+        \tcbuselibrary{breakable, skins, listings}
+        \newtcolorbox{example}[1][]{
+          breakable, enhanced, colback=blue!5, colframe=blue!50,
+          fonttitle=\bfseries, title=Example #1
+        }
+        \newtcolorbox{realsystem}[1][]{
+          breakable, enhanced, colback=gray!5, colframe=gray!60,
+          fonttitle=\bfseries, title=Real-system reference: #1
+        }
+        \newtcolorbox{exercise}[1][]{
+          breakable, enhanced, colback=green!5, colframe=green!50,
+          fonttitle=\bfseries, title=Reading exercise #1
+        }
+
+execute:
+  freeze: auto
+
+# Snippet inclusion: chapters currently inline their code listings.
+# When the book pins NebulaStream as a `vendor/` submodule and pulls
+# snippets directly from it, re-add the include-code-files filter:
+#
+#   filters:
+#     - include-code-files
+#
+# Install with: quarto add quarto-ext/include-code-files
+#
+# Until then, the Makefile drift-check target verifies every cited
+# path/line range still resolves against /Users/zeuchste/git/nebulastream.

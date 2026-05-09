@@ -1,0 +1,314 @@
+# The Worker Process and Client Frontends {#sec-frontends}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+So far, every chapter has been about what runs *inside* the engine.
+This chapter is about how a user gets queries *into* the engine —
+through what processes, over what protocols, in what shape.
+
+Three pieces:
+
+- **`nes-single-node-worker`** — the worker process. A long-running
+  binary that listens for queries, executes them, and reports
+  status. This is where the engine actually lives.
+- **`nes-frontend/apps/cli`** — a non-interactive CLI for
+  submitting queries from a script.
+- **`nes-frontend/apps/repl`** — an interactive REPL,
+  conventionally called `nes-repl`.
+
+All three communicate over gRPC. We will walk through each.
+
+---
+
+## 18.1 The worker process {#sec-worker-process}
+
+The worker binary is `nes-single-node-worker`. Its main entry
+point lives in `nes-single-node-worker/src/SingleNodeWorker.cpp`.
+On startup it:
+
+1. Reads its configuration (file path or CLI args).
+2. Constructs a `BufferManager`, an `ExecutableQueryPlan`
+   compiler, a `QueryEngine`, and the catalogs.
+3. Calls `registerAll` on each plugin registry to populate them.
+4. Starts the gRPC server on (default) localhost:8080.
+5. Waits for queries.
+
+The single class `SingleNodeWorker` orchestrates the engine's
+core. Its main public surface is the `registerQuery` method:
+
+```cpp
+// nes-single-node-worker/src/SingleNodeWorker.cpp (sketch)
+std::expected<QueryId, Exception>
+SingleNodeWorker::registerQuery(LogicalPlan plan) noexcept
+{
+    if (plan.getQueryId() == INVALID_QUERY_ID) {
+        std::uniform_int_distribution<size_t> dist(
+            QueryId::INITIAL,
+            std::numeric_limits<int32_t>::max());
+        plan.setQueryId(QueryId(dist(*idGenerator.wlock())));
+    }
+    auto request = std::make_unique<QueryCompilation::QueryCompilationRequest>(plan);
+    auto result = compiler->compileQuery(std::move(request));
+    // ... store the compiled plan, return the query id ...
+}
+```
+
+The function takes a `LogicalPlan` (already parsed and bound by
+the client) and returns either a `QueryId` (success) or an
+`Exception` (failed compilation). The compiled plan is stored in
+the engine's catalog; subsequent `startQuery` and `stopQuery`
+calls reference it by `QueryId`.
+
+The worker is a single-process, multi-threaded design. There is
+no daemon-and-workers split inside a single worker. One
+`nes-single-node-worker` process can run as a stand-alone engine
+(everything in one process) or as one node in a distributed
+deployment, where multiple workers are coordinated by a
+separate Rust coordinator (Chapter 19). The gRPC API on port
+8080 is the same in both modes; the only difference is whether
+the worker is reachable to *other* workers via the
+`nes-network` channels.
+
+---
+
+## 18.2 The gRPC service {#sec-grpc-service}
+
+The gRPC service is in
+`nes-single-node-worker/include/GrpcService.hpp`. The service
+definition:
+
+```cpp
+// nes-single-node-worker/include/GrpcService.hpp
+class GRPCServer final : public WorkerRPCService::Service {
+public:
+    grpc::Status RegisterQuery(grpc::ServerContext*,
+                               const RegisterQueryRequest*,
+                               RegisterQueryReply*) override;
+    grpc::Status StartQuery(grpc::ServerContext*,
+                            const StartQueryRequest*,
+                            google::protobuf::Empty*) override;
+    grpc::Status StopQuery(grpc::ServerContext*,
+                           const StopQueryRequest*,
+                           google::protobuf::Empty*) override;
+    grpc::Status RequestQueryStatus(grpc::ServerContext*,
+                                    const QueryStatusRequest*,
+                                    QueryStatusReply*) override;
+    grpc::Status RequestStatus(grpc::ServerContext*,
+                               const WorkerStatusRequest*,
+                               WorkerStatusResponse*) override;
+    explicit GRPCServer(SingleNodeWorker&& delegate)
+        : delegate(std::move(delegate)) { }
+private:
+    SingleNodeWorker delegate;
+};
+```
+
+Five methods. `RegisterQuery` accepts a serialised `LogicalPlan`
+and returns a `QueryId`. `StartQuery` and `StopQuery` are
+identifier-only operations. `RequestQueryStatus` returns the
+state of a single query (registered, running, stopped, failed).
+`RequestStatus` returns engine-wide health (active queries,
+buffer utilisation, etc.).
+
+The proto definitions live in `grpc/`:
+
+- `SingleNodeWorkerRPCService.proto` — the service interface.
+- `SerializableQueryPlan.proto` — the wire format for
+  `LogicalPlan`. Logical plans are not directly serialised C++
+  objects; they go through this proto encoding.
+- `SerializableDataType.proto` — the wire format for `DataType`
+  and `Schema`.
+
+The proto encoding means the parser and binder run *on the client*,
+not the worker. The worker receives a fully-bound logical plan and
+proceeds straight to optimisation. We will see why this matters
+in @sec-where-bind.
+
+---
+
+## 18.3 Where binding happens {#sec-where-bind}
+
+A query in NebulaStream is bound on the client side, not the
+server side. The client (the REPL or the CLI) parses the SQL,
+binds against its local copy of the source/sink catalog, and sends
+the worker a serialised `LogicalPlan`.
+
+This is unusual. Most database systems bind on the server, where
+the catalog lives authoritatively. NebulaStream's choice flips the
+arrangement: the catalog is conceptually authoritative on the
+worker (it owns the engine's running state), but binding can run
+on either side because catalog updates flow both ways via gRPC.
+
+The benefit is that the gRPC API can ingest fully-typed plans
+with no further validation needed. The cost is that the client
+needs a recent view of the catalog. In the single-node deployment
+we have today, the cost is essentially zero (catalog is local to
+the same machine). In a future distributed deployment, the cost
+becomes non-trivial — the catalog has to be replicated to wherever
+the binding happens.
+
+---
+
+## 18.4 The REPL {#sec-repl}
+
+The interactive front-end is `nes-frontend/apps/repl`. The class
+is `Repl`, in `nes-frontend/apps/repl/Repl.hpp`:
+
+```cpp
+// nes-frontend/apps/repl/Repl.hpp (sketch)
+class Repl {
+public:
+    Repl(SourceStatementHandler&,
+         SinkStatementHandler&,
+         TopologyStatementHandler&,
+         QueryStatementHandler&,
+         StatementBinder&,
+         ErrorBehaviour,
+         OutputFormat,
+         InteractiveMode,
+         std::stop_token);
+    void run();
+private:
+    struct Impl;
+    std::unique_ptr<Impl> pImpl;
+};
+```
+
+The `Repl` is a Pimpl-shaped class — its private state lives
+behind a `unique_ptr<Impl>` to keep the header light. The
+constructor takes one handler per statement kind (source, sink,
+topology, query) plus a binder, plus configuration.
+
+`run` is the main loop: read a line, parse, bind, dispatch to
+the appropriate handler. The handler talks to the worker over
+gRPC. Output is formatted according to the configured `OutputFormat`
+(table, CSV, JSON).
+
+The REPL is the user's typical entry point. It accepts the same
+SQL as the CLI; the only difference is interactivity.
+
+---
+
+## 18.5 The CLI {#sec-cli}
+
+The non-interactive CLI is `nes-frontend/apps/cli`, conventionally
+called `nebuli`. The starter is in
+`nes-frontend/apps/cli/CLIStarter.cpp`. Its job is the same as the
+REPL's, minus the readline loop: read SQL from stdin or a file,
+bind, submit, exit.
+
+The CLI is what scripts use. The README's demo query is exercised
+end-to-end through it:
+
+```shell
+cmake-build-debug/nes-frontend/apps/cli/nebuli -s localhost:8080 < demo.sql
+```
+
+`nebuli`'s output is conventionally CSV-formatted (one row per
+result tuple); the REPL defaults to a table format. Both can be
+overridden.
+
+---
+
+## 18.6 The configuration system {#sec-configurations}
+
+A short note on the infrastructure that all of the above is
+configured through. The `nes-configurations/` module supplies
+a small visitor-based configuration framework — `BaseConfiguration`
+and a family of typed options (`ScalarOption`, `EnumOption`,
+`SequenceOption`) plus validators (`IpValidation`,
+`BooleanValidation`, etc.). Both command-line flags and YAML
+configuration files map onto the same option tree, so a worker
+configuration that lives in a YAML file can be overridden on
+the command line with no syntactic difference.
+
+This is what `--worker.default_query_execution.execution_mode=INTERPRETER`
+in our exercises throughout the book actually does: walks the
+`SingleNodeWorkerConfiguration` tree and sets one
+`EnumOption<ExecutionMode>` leaf. The same mechanism powers the
+coordinator's configuration in distributed deployments
+(Chapter 19).
+
+The dependence on a generic configuration framework rather
+than ad-hoc parsing makes it cheap to add new options as the
+engine grows; almost every chapter that has introduced a
+"configurable" concept (buffer pool size, watermark slack,
+network thread count) is plumbed through this same machinery.
+
+## 18.7 Topology statements (and what they hint at) {#sec-topology}
+
+The REPL's constructor mentions a `TopologyStatementHandler`. This
+is for statements like `SHOW TOPOLOGY` and (eventually) `ATTACH
+NODE`, `DETACH NODE` — statements that interact with the engine's
+topology rather than its data flow.
+
+In the single-node deployment we have today, these statements are
+mostly no-ops or query the trivially-trivial single-node topology.
+In a future distributed deployment, they would be the user's
+window into the engine's topology graph.
+
+We mention them here because they are the only piece of the
+front-end that points at the engine's distributed future. We will
+have more to say about that future in Chapter 19.
+
+---
+
+## Summary {#sec-ch18-summary}
+
+NebulaStream's worker is a single C++ process (`nes-single-node-worker`)
+exposing five gRPC methods: register, start, stop, query status,
+worker status. Two client frontends — an interactive REPL
+(`nes-repl`) and a non-interactive CLI (`nebuli`) — speak to the
+worker over the same gRPC API. Binding happens client-side; the
+worker receives fully-typed `LogicalPlan`s. The architecture is
+deliberately flat: no separate coordinator, no daemon-workers
+split; one process is the engine.
+
+---
+
+## Reading exercises {#sec-ch18-exercises}
+
+::: {.callout-important title="Reading exercise 18.1: end-to-end demo"}
+Run the README's demo query end-to-end. Use `nes-repl` as
+client, `nes-single-node-worker` as server. Verify the round-
+trip: SQL in, CSV out. Where in the worker's log do you see the
+`RegisterQuery` arrive? Where do you see the first `WorkTask`
+emitted? Where does the file source's first read happen?
+:::
+
+::: {.callout-important title="Reading exercise 18.2: speak gRPC directly"}
+Use `grpcurl` (or the equivalent in your language of choice) to
+hit the worker's `RequestStatus` endpoint directly:
+
+```shell
+grpcurl -plaintext -d '{}' localhost:8080 \
+    nes.proto.WorkerRPCService/RequestStatus
+```
+
+You should get back a status structure. Identify the fields:
+how many queries are running? How is the worker's health
+reported?
+:::
+
+::: {.callout-important title="Reading exercise 18.3: client-side binding"}
+Modify a small `nes-repl` invocation to use a source name that
+exists on the client but does not exist on the worker. Does
+the binder error before the gRPC call, or does the worker
+reject the plan? Trace through the code to confirm.
+:::
+
+---
+
+## References {#sec-ch18-refs}
+
+- *SingleNodeWorker.* `nes-single-node-worker/src/SingleNodeWorker.cpp`.
+- *gRPC service.*
+  `nes-single-node-worker/include/GrpcService.hpp`.
+- *gRPC proto definitions.* `grpc/SingleNodeWorkerRPCService.proto`.
+- *REPL.* `nes-frontend/apps/repl/Repl.hpp`.
+- *CLI.* `nes-frontend/apps/cli/CLIStarter.cpp`.
+- *Frontend reference.*
+  `/Users/zeuchste/git/nebulastream/docs/nebulastream-frontend.md`.
+- *gRPC.* Google. *gRPC: A high performance, open source universal
+  RPC framework.* `https://grpc.io/`.

@@ -1,0 +1,305 @@
+# Pipelining and Compiled Plans {#sec-pipelining}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+A physical plan is a DAG of operators. A pipelined plan is a DAG
+of *pipelines*, each pipeline being a chain of operators that the
+JIT can fuse into a single tight loop. Pipelining is the engine's
+answer to a question every query compiler eventually faces: where
+do I draw the boundaries of the generated code?
+
+The wrong answer in either direction is bad. Generate one giant
+function for the whole plan and you waste compile time on code
+that does not need to be co-optimised, and you cannot release
+intermediate state until the whole query finishes. Generate one
+function per operator and you incur a function-call boundary at
+every record, defeating the point of code generation in the first
+place.
+
+The right answer is well known [@hyper-paper]: fuse what can be
+fused (operators that pass records one-at-a-time), break at
+operators that materialise (joins, aggregations, sorts). The
+operators where you must break are called *pipeline breakers*.
+
+NebulaStream's `PipeliningPhase` does exactly this.
+
+---
+
+## 11.1 The shape of a pipeline {#sec-pipeline-shape}
+
+A pipeline is a sequence of physical operators with a single
+producer (a source operator or a probe operator) and a single
+consumer (a sink operator or a build operator). Records flow from
+producer to consumer through the chain, one at a time, with no
+intermediate materialisation. The JIT generates one function whose
+loop body executes the chain.
+
+The data structure is in
+`nes-query-compiler/include/PipelinedQueryPlan.hpp`:
+
+```cpp
+// nes-query-compiler/include/PipelinedQueryPlan.hpp
+struct PipelinedQueryPlan final {
+    explicit PipelinedQueryPlan(QueryId id, ExecutionMode executionMode);
+    [[nodiscard]] std::vector<std::shared_ptr<Pipeline>> getSourcePipelines() const;
+    [[nodiscard]] const std::vector<std::shared_ptr<Pipeline>>& getPipelines() const;
+    void addPipeline(const std::shared_ptr<Pipeline>& pipeline);
+    void removePipeline(Pipeline& pipeline);
+};
+```
+
+A `PipelinedQueryPlan` is a vector of `Pipeline`s, distinguishing
+the *source pipelines* (those starting at a source operator) from
+the rest. The distinction matters because source pipelines are the
+ones that get scheduled when sources produce data; everything else
+is reactive.
+
+---
+
+## 11.2 The pipelining phase {#sec-pipelining-phase}
+
+The phase is `PipeliningPhase`, in
+`nes-query-compiler/private/Phases/PipeliningPhase.hpp`. Its
+algorithm, simplified:
+
+1. Walk the physical plan in topological order.
+2. For each operator, decide whether to *continue* the current
+   pipeline or start a *new* pipeline.
+3. The decision is encoded as `PipelinePolicy::Continue` or
+   `PipelinePolicy::ForceNew`.
+
+The enum and its case analysis live in
+`nes-query-compiler/src/Phases/PipeliningPhase.cpp`:
+
+```cpp
+// nes-query-compiler/src/Phases/PipeliningPhase.cpp
+enum class PipelinePolicy : uint8_t {
+    Continue,   /// Uses the current pipeline for the next operator
+    ForceNew    /// Enforces a new pipeline for the next operator
+};
+```
+
+The recursive builder applies five rules in order; the first
+match wins:
+
+| # | Operator kind | Policy | Why |
+|---|---|---|---|
+| 1 | Custom Scan | `ForceNew` | New pipeline begins at the scan; child operators chain in |
+| 2 | Custom Emit | `ForceNew` | A scan must precede an emit if the previous op was also an emit |
+| 3 | Sink | `ForceNew` | Sinks are pipeline terminators; format operators may be inserted |
+| 4 | Merge point (in-degree > 1) | `ForceNew` (override) | A DAG node with multiple parents cannot be fused into either parent |
+| 5 | Fusible (Selection, Projection, Map) | `Continue` | Default; appended to current pipeline |
+
+Rule 4 is the override that catches operators that *would* have
+been fusible but cannot be because two upstream pipelines feed
+them. The check is a single line:
+
+```cpp
+// nes-query-compiler/src/Phases/PipeliningPhase.cpp (sketch)
+if (policy != PipelinePolicy::ForceNew && mergePoints.contains(opId)) {
+    policy = PipelinePolicy::ForceNew;
+}
+```
+
+A sink is always a pipeline breaker because the engine does not
+fuse sink writes with operator computation. A stateful build
+(join build, aggregation build) is a pipeline breaker because
+the build materialises into a hash map. A stateful probe is the
+*start* of a new pipeline, because it consumes from the
+materialised state asynchronously.
+
+The fusible operators — Selection, Projection, Map — get
+`PipelinePolicy::Continue` by default and become part of
+whatever pipeline they sit in.
+
+---
+
+## 11.3 Pipeline breakers, walked through {#sec-breakers}
+
+For our running demo query (Chapter 2), the pipelined plan is
+trivial:
+
+```
+Pipeline 1: [SourcePhysicalOperator(demo) → SinkPhysicalOperator(result)]
+```
+
+One source pipeline, one sink, no break in between (because there
+is no stateful operator). The JIT generates one function for the
+whole pipeline; the loop body reads a record from the source,
+projects (in this case, identity), writes to the sink. Done.
+
+For a hash-join query, the picture is more interesting. Consider:
+
+```sql
+SELECT * FROM r JOIN s ON r.key = s.key INTO matched;
+```
+
+After lowering (Chapter 10), the physical plan is:
+
+```
+Sink ← HJProbe ← Source(s)
+       HJBuild ← Source(r)
+```
+
+`HJProbe` is the consumer of records from `s`; `HJBuild` is the
+consumer of records from `r`. The two halves share an
+`OperatorHandlerId` that points to a single hash map.
+
+After pipelining, this becomes three pipelines:
+
+```
+Pipeline A (source pipeline): [Source(r) → HJBuild]
+Pipeline B (source pipeline): [Source(s) → HJProbe → Sink]
+```
+
+`HJBuild` is a pipeline breaker; pipeline A ends at it. `HJProbe`
+starts pipeline B. The two pipelines are independent at the
+scheduler's level — they run as separate compiled functions, each
+producing/consuming `WorkTask`s — but they communicate through the
+shared hash map handler.
+
+::: {.callout-note title="Example 11.1: aggregation pipelines"}
+A windowed aggregation `SELECT AVG(x) FROM s GROUP BY k WINDOW
+TUMBLING(ts, 1 SEC)` lowers and pipelines into:
+
+```
+Pipeline A: [Source(s) → AggregationBuild]
+Pipeline B: [AggregationProbe → Sink]
+```
+
+Pipeline A executes whenever a source-emitted `WorkTask` lands.
+Pipeline B executes when a window fires (driven by watermarks
+from pipeline A). The hash map is owned by the aggregation
+handler; pipeline A inserts, pipeline B walks and emits.
+:::
+
+---
+
+## 11.4 Within a pipeline: the producer/consumer protocol {#sec-producer-consumer}
+
+Inside a pipeline, the operators do not call each other through C++
+methods. They communicate through the `Record` interface, which is
+the per-tuple data structure the JIT operates on:
+
+```cpp
+// nes-nautilus/include/Nautilus/Interface/Record.hpp
+class Record {
+public:
+    explicit Record() = default;
+    explicit Record(std::unordered_map<RecordFieldIdentifier, VarVal>&& recordFields);
+    void reassignFields(const Record& other);
+    const VarVal& read(const RecordFieldIdentifier& recordFieldIdentifier) const;
+    void write(const RecordFieldIdentifier& recordFieldIdentifier,
+               const VarVal& varVal);
+    nautilus::val<uint64_t> getNumberOfFields() const;
+    [[nodiscard]] bool hasField(const RecordFieldIdentifier& fieldName) const;
+};
+```
+
+A `Record` is a typed bag of fields. The fields are of type
+`VarVal`, which is a Nautilus-side variant of all the primitive
+types in NebulaStream's data model. At code generation time, every
+`Record::read` and `Record::write` is lowered to direct memory
+accesses (via the `MemoryProvider` from Chapter 4); there is no
+runtime hash lookup.
+
+Within a pipeline, the producer's `execute` ends with
+`consumer.execute(record)`; the consumer's `execute` reads fields
+through `Record::read`, modifies through `Record::write`, and
+forwards. The whole chain ends up as a single tight loop in the
+generated code.
+
+---
+
+## 11.5 The compiled plan {#sec-compiled-plan}
+
+After pipelining and JIT compilation, the plan becomes a
+`CompiledQueryPlan`. The structure is in
+`nes-executable/include/CompiledQueryPlan.hpp`:
+
+```cpp
+// nes-executable/include/CompiledQueryPlan.hpp
+struct CompiledQueryPlan {
+    QueryId id;
+    std::vector<ExecutablePipelineStage> stages;
+    std::vector<SourceDescriptor> sources;
+    std::vector<SinkDescriptor> sinks;
+    // ...
+};
+```
+
+`stages` is the JIT output: one `ExecutablePipelineStage` per
+pipeline, each holding a function pointer (or, in INTERPRETER mode,
+a trace to interpret). `sources` and `sinks` carry the
+fully-specified descriptors from Chapter 8 — the worker constructs
+its own source and sink instances from these without consulting the
+coordinator.
+
+The `CompiledQueryPlan` is the artefact handed to the query engine
+in @sec-stage6-run for execution. It is the boundary between
+"compile-time" and "run-time": everything to the left of it is
+preparation, everything to the right is data flow.
+
+---
+
+## Summary {#sec-ch11-summary}
+
+The pipelining phase converts a physical plan into a DAG of
+pipelines, each pipeline being a chain of operators the JIT can
+fuse into a single function. Pipeline breaks happen at sinks and
+at the build half of stateful operator pairs. Within a pipeline,
+operators communicate through the `Record` interface, which the
+JIT lowers to direct memory accesses. Across pipelines, operators
+communicate through shared operator handlers, scheduled as
+independent `WorkTask`s by the runtime. The output of pipelining
+plus JIT is a `CompiledQueryPlan` carrying both the executable
+stages and the fully-specified source/sink descriptors needed by
+the worker.
+
+---
+
+## Reading exercises {#sec-ch11-exercises}
+
+::: {.callout-important title="Reading exercise 11.1: count pipelines"}
+For each query, predict and then verify the number of pipelines
+in the compiled plan:
+
+1. `SELECT * FROM s INTO sink;`
+2. `SELECT * FROM s WHERE x > 0 INTO sink;`
+3. `SELECT * FROM r JOIN s ON r.k = s.k INTO sink;`
+4. `SELECT k, COUNT(*) FROM s GROUP BY k WINDOW TUMBLING(ts, 1 SEC) INTO sink;`
+
+How does the count change as you add stateful operators?
+:::
+
+::: {.callout-important title="Reading exercise 11.2: trace fusion"}
+Add `NES_DEBUG` log lines at the start of every physical
+operator's `execute`. Run a `SELECT * WHERE x > 0` query.
+Observe that no virtual call appears between the source and the
+sink — the selection's `execute` and the projection's `execute`
+are inlined into one tight loop. The log lines should fire in
+strict per-record order.
+:::
+
+::: {.callout-important title="Reading exercise 11.3: examine the IR"}
+Run any systest with `--worker.default_query_execution.execution_mode=COMPILER`
+and `mlir.dumpIR` enabled. The MLIR for a simple pipeline should
+fit on one screen. Identify the loop, the field accesses, and
+the call into the sink.
+:::
+
+---
+
+## References {#sec-ch11-refs}
+
+- *PipeliningPhase.*
+  `nes-query-compiler/private/Phases/PipeliningPhase.hpp`.
+- *PipelinedQueryPlan.*
+  `nes-query-compiler/include/PipelinedQueryPlan.hpp`.
+- *Record.* `nes-nautilus/include/Nautilus/Interface/Record.hpp`.
+- *Hyper.* T. Neumann. *Efficiently Compiling Efficient Query
+  Plans for Modern Hardware.* VLDB 2011.
+- *Pipelined query execution.* G. Graefe.
+  *Query Evaluation Techniques for Large Databases.* ACM Comput.
+  Surv., 1993.

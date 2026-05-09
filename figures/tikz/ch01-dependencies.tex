@@ -1,0 +1,23 @@
+% Chapter 1 — Part dependencies overview
+\input{_preamble.tex}
+
+\begin{document}
+\begin{tikzpicture}[node distance=14mm and 12mm]
+
+    \node[nes-box-title] (P1) {Part I\\\small Foundations\\\scriptsize Ch 1--4};
+    \node[nes-box, right=of P1] (P2) {Part II\\\small Query Frontier\\\scriptsize Ch 5--8};
+    \node[nes-box, right=of P2] (P3) {Part III\\\small Optimisation \&\\\small Compilation\\\scriptsize Ch 9--13};
+    \node[nes-box, right=of P3] (P4) {Part IV\\\small Runtime\\\scriptsize Ch 14--18};
+    \node[nes-box, right=of P4] (P5) {Part V\\\small Operations\\\scriptsize Ch 19--22};
+
+    \draw[nes-arrow] (P1) -- (P2);
+    \draw[nes-arrow] (P2) -- (P3);
+    \draw[nes-arrow] (P3) -- (P4);
+    \draw[nes-arrow] (P4) -- (P5);
+
+    % Skip-edges
+    \draw[nes-arrow] (P1.south) to[bend right=22] (P4.south);
+    \draw[nes-arrow-dashed] (P2.north) to[bend left=22] (P5.north);
+
+\end{tikzpicture}
+\end{document}

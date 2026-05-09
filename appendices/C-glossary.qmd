@@ -1,0 +1,92 @@
+# Glossary {#sec-app-glossary .unnumbered}
+
+::: {.callout-warning title="Status: stub — populated as chapters are drafted"}
+:::
+
+**AdmissionQueue.** Bounded MPMC queue used by sources, query starts
+and query stops to inject tasks into the engine. Backpressure surface.
+See @sec-solving-p2.
+
+**Coordinator.** A separate process (Rust-implemented, currently
+on the `ys-coordinator-integration` branch) that accepts queries,
+runs the distributed planner, distributes per-worker subplans,
+and coordinates lifecycle across workers. Chapter 19.
+
+**DistributedLogicalPlan.** A `LogicalPlan` whose operators are
+tagged with placement — which worker each operator belongs to.
+Output of the distributed planner. See `nes-distributed/`.
+
+**DistributedQuery.** Runtime representation of a query whose
+operators run on multiple workers. See `nes-distributed/`.
+
+**BIFOLD.** Berlin Institute for the Foundations of Learning and Data.
+Hosts the joint research project under which NebulaStream is developed.
+
+**BM.** BufferManager. Owns the pool of `TupleBuffer`s.
+
+**Continuation.** A worker-thread strategy for handling a full task
+queue without blocking, proposed in NebulaStream's design document but
+superseded by the unbounded internal queue in the current
+implementation. See @sec-solving-p1.
+
+**DIMA.** Database Systems and Information Management group at TU
+Berlin.
+
+**Frontier.** In timely/differential dataflow, the lower bound of
+timestamps that an operator may still receive. NebulaStream does not
+use frontiers; see [Chapter 15](../chapters/15-two-queue-scheduler.qmd)
+for context.
+
+**ILP planner.** The integer-linear-programming-based component
+that places operators across workers in a distributed deployment.
+Lives in the distributed planner; consumes `NetworkTopology` and
+`WorkerCatalog`; produces a `DistributedLogicalPlan`. Chapter 19.
+
+**LHS / RHS.** Left- and right-hand side, used throughout the codebase
+to label join inputs.
+
+**MLIR.** Multi-Level Intermediate Representation. The IR family
+NebulaStream's Nautilus JIT lowers to. Chapter 12.
+
+**NetworkTopology.** The graph of workers and the connectivity
+between them. Consumed by the distributed planner. See
+`nes-distributed/include/NetworkTopology.hpp`.
+
+**`nes-distributed`.** Module on `origin/main` holding the
+distributed-plan abstractions, worker catalog, and network
+topology graph. Chapter 19.
+
+**`nes-network`.** Module on `origin/main` holding the
+inter-worker data plane — Rust channels (`channel.rs`,
+`memcom.rs`) with C++ FFI bindings. Chapter 19.
+
+**Nautilus.** NebulaStream's tracing-based JIT framework. Chapter 12.
+
+**OP.** Operator (logical or physical).
+
+**OriginId / SequenceNumber / ChunkNumber / Watermark.** The four
+progress identifiers used to reason about event-time progress and
+window triggering. Chapter 7.
+
+**PendingPipelineStop.** A polling task that checks whether a pipeline
+still has references and re-emits itself if so. See
+@sec-pending-pipeline-stop.
+
+**SS.** StringStream. Used internally for log formatting.
+
+**Systest.** A SQL-based end-to-end test in `nes-systests/`,
+authored as a `.test` file. Chapter 20.
+
+**TaskQueue.** The pair of internal-and-admission queues plus the
+counting semaphore that synchronises them. Chapter 15.
+
+**TB.** TupleBuffer. The unit of data movement in NebulaStream.
+Chapter 3.
+
+**TupleBuffer.** A reference-counted, fixed-size memory region holding
+a batch of tuples. The unit of inter-operator data flow.
+
+**WorkerCatalog.** The registry of available workers in a
+distributed deployment, with their resources, capabilities, and
+network reachability. Owned by the coordinator. See
+`nes-distributed/include/WorkerCatalog.hpp`.

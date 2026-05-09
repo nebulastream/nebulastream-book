@@ -1,0 +1,31 @@
+# Quarto build output
+_book/
+/.quarto/
+.quarto/
+**/*.quarto_ipynb
+
+# LaTeX/PDF build artifacts (Quarto leaves these at repo root after PDF render)
+/*.tex
+/*.aux
+/*.bbl
+/*.bcf
+/*.blg
+/*.fdb_latexmk
+/*.fls
+/*.log
+/*.out
+/*.run.xml
+/*.synctex.gz
+/*.pdf
+
+# TikZ build artifacts (figures/tikz/build.sh leaves these alongside the .svg)
+figures/tikz/*.compile.log
+figures/tikz/*.log
+figures/tikz/*.aux
+figures/tikz/*.dvi
+
+# OS noise
+.DS_Store
+
+# Submodule placeholder (see WRITING_PLAN.md re-pin discussion)
+vendor/

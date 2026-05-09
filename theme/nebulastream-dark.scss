@@ -1,0 +1,172 @@
+/*-- scss:defaults --*/
+
+// NebulaStream brand palette — dark variant matching the website's hero
+$nes-primary:        #BB3DCB;   // brighter purple for dark backgrounds (still on-brand)
+$nes-primary-deep:   #9400A5;   // canonical brand color
+$nes-primary-soft:   #E0B0E8;
+$nes-accent:         #4DD8E5;   // brighter cyan
+$nes-bg:             #15101A;   // very dark plum-tinted black
+$nes-bg-elev:        #1F1626;   // raised surface
+$nes-bg-card:        #261A30;   // card surface (matches feature-card backdrop blur effect)
+$nes-ink:            #F2EEF7;   // off-white text
+$nes-ink-soft:       #B8B0C5;
+$nes-border:         #382B45;
+$nes-code-bg:        #1A1322;
+
+// Bootstrap variable overrides
+$primary:            $nes-primary;
+$secondary:          $nes-ink-soft;
+$body-color:         $nes-ink;
+$body-bg:            $nes-bg;
+$link-color:         $nes-primary-soft;
+$link-hover-color:   $nes-primary;
+$border-color:       $nes-border;
+$code-color:         $nes-primary-soft;
+$code-bg:            $nes-code-bg;
+
+// Typography
+$web-font-path:      "https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=Roboto+Slab:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap";
+$font-family-sans-serif:  "Montserrat", -apple-system, sans-serif;
+$font-family-serif:       "Roboto Slab", Georgia, serif;
+$font-family-monospace:   "JetBrains Mono", "SF Mono", Menlo, monospace;
+$headings-font-family:    "Montserrat", sans-serif;
+$headings-font-weight:    700;
+
+$border-radius:           0.75rem;
+$border-radius-sm:        0.5rem;
+
+/*-- scss:rules --*/
+
+@import url(#{$web-font-path});
+
+body {
+    font-family: "Roboto Slab", Georgia, serif;
+    line-height: 1.65;
+    background: $nes-bg;
+    color: $nes-ink;
+}
+
+h1, h2, h3, h4, h5, h6,
+.h1, .h2, .h3, .h4, .h5, .h6 {
+    font-family: "Montserrat", sans-serif;
+    font-weight: 700;
+    color: $nes-ink;
+    letter-spacing: -0.01em;
+}
+
+h2, .h2 {
+    border-bottom: 2px solid $nes-primary;
+    padding-bottom: 0.4rem;
+}
+
+a {
+    color: $nes-primary-soft;
+    text-decoration: none;
+    &:hover { color: $nes-primary; }
+}
+
+.sidebar-navigation, #quarto-sidebar {
+    background: linear-gradient(180deg, $nes-bg 0%, $nes-bg-elev 100%);
+    border-right: 1px solid $nes-border;
+}
+
+.sidebar-item.active > .sidebar-item-container > a,
+.sidebar-link.active {
+    color: $nes-primary !important;
+}
+
+.quarto-title-block,
+.quarto-title-banner,
+.quarto-title {
+    background: linear-gradient(135deg, $nes-primary-deep 0%, #6E007B 100%);
+    color: white;
+    padding: 2rem;
+    border-radius: 0.75rem;
+    margin-bottom: 2.5rem;
+
+    *, h1, .h1, .title, .subtitle, .author, .date,
+    .header-section-number, a, code {
+        color: white !important;
+        border-color: rgba(255,255,255,0.4) !important;
+    }
+    .subtitle, .author, .date {
+        color: rgba(255,255,255,0.92) !important;
+    }
+    a:hover { color: $nes-primary-soft !important; }
+    code {
+        background-color: rgba(0,0,0,0.35) !important;
+        color: white !important;
+        border-radius: 0.25rem;
+        padding: 0.05em 0.35em;
+    }
+}
+
+.quarto-title-block .header-section-number,
+.quarto-title-banner .header-section-number,
+h1.title .header-section-number {
+    color: rgba(255,255,255,0.7) !important;
+    margin-right: 0.5em;
+}
+
+pre {
+    background-color: $nes-code-bg;
+    color: $nes-ink;
+    border: 1px solid $nes-border;
+    border-radius: 0.75rem;
+    padding: 1rem 1.25rem;
+    box-shadow: 0 0 0.5rem rgba(0,0,0,0.4);
+}
+
+p > code, li > code {
+    background-color: $nes-code-bg;
+    color: $nes-primary-soft;
+    padding: 0.1em 0.35em;
+    border-radius: 0.25rem;
+}
+
+// Callouts — frosted-card aesthetic mirroring the website
+.callout {
+    background-color: $nes-bg-card;
+    border-radius: 0.75rem;
+    border: 1px solid $nes-border;
+    box-shadow: 0 0 0.75rem rgba(0,0,0,0.4);
+}
+
+.callout-note { border-left: 4px solid $nes-primary; }
+.callout-tip  { border-left: 4px solid $nes-accent; }
+.callout-important {
+    border-left: 4px solid $nes-primary;
+    .callout-header { background-color: $nes-primary-deep; color: white; }
+}
+.callout-warning { border-left: 4px solid #E07B00; }
+
+table thead th {
+    background-color: $nes-primary-deep;
+    color: white;
+    font-family: "Montserrat", sans-serif;
+}
+table tbody td { border-bottom: 1px solid $nes-border; }
+table tbody tr:nth-child(even) td { background-color: $nes-bg-elev; }
+
+blockquote {
+    border-left: 4px solid $nes-primary;
+    background-color: $nes-bg-elev;
+    padding: 1rem 1.25rem;
+    border-radius: 0 0.5rem 0.5rem 0;
+}
+
+input[type="search"] {
+    background-color: $nes-bg-elev;
+    color: $nes-ink;
+    border: 1px solid $nes-border;
+    border-radius: 1.5rem;
+    &:focus {
+        border-color: $nes-primary;
+        box-shadow: 0 0 0 3px rgba($nes-primary, 0.25);
+    }
+}
+
+.page-footer, .quarto-page-footer {
+    background-color: #0E0A12;
+    color: $nes-ink-soft;
+}

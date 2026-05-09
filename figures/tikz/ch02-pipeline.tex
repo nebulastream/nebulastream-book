@@ -1,0 +1,19 @@
+% Chapter 2 — System tour pipeline
+\input{_preamble.tex}
+
+\begin{document}
+\begin{tikzpicture}[node distance=8mm and 8mm]
+
+    \node[nes-pill] (A) {SQL text};
+    \node[nes-pill, right=of A] (B) {Logical\\plan};
+    \node[nes-pill, right=of B] (C) {Optimised\\logical plan};
+    \node[nes-pill, right=of C] (D) {Physical\\plan};
+    \node[nes-pill, right=of D] (E) {Pipelined\\plan};
+    \node[nes-pill, right=of E] (F) {Compiled\\plan};
+    \node[nes-pill, fill=nesPrimary, text=white, right=of F] (G) {Running\\tasks};
+
+    \foreach \src/\dst in {A/B,B/C,C/D,D/E,E/F,F/G}
+        \draw[nes-arrow] (\src) -- (\dst);
+
+\end{tikzpicture}
+\end{document}

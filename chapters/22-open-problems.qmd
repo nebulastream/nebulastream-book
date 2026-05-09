@@ -1,0 +1,278 @@
+# Where to Next: Open Problems {#sec-open-problems}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+A book about a research engine has to end with a chapter about
+what is *not* yet built. The vision in Chapter 1 is ambitious; the
+implementation we have walked through is large but incomplete.
+The honest place to close is where the team is going next.
+
+This chapter inventories the open problems. They are drawn from
+the in-tree design documents, the CLAUDE.md notes, and the gaps
+this book has flagged in earlier chapters. None of them is
+"trivial cleanup"; each is the subject of active research.
+
+---
+
+## 22.1 What's left in the distributed story {#sec-distributed-future}
+
+The first draft of this chapter named "moving from single-node to
+distributed" as the single biggest open problem. That description
+was wrong — distribution had landed on `origin/main` (Chapter 19).
+The open-problem list got *longer*, not shorter, as the
+all-encompassing item resolved into several finer ones.
+
+**Cost-model calibration for the ILP planner.** The current
+distributed planner weights network bandwidth and per-worker
+load, but the weights are still hand-tuned. Real workloads
+need hardware-affinity-aware weighting (a GPU operator's cost
+differs from a CPU operator's) and the ILP solver needs to
+scale to topologies of hundreds of workers, not the dozens
+currently exercised in tests.
+
+**Failure recovery and checkpointing.** A worker crash today
+fails the query and requires re-submission. The catalog
+infrastructure is in place to make recovery possible; the
+actual checkpoint-and-replay machinery is the next major work
+item. We treat this as its own sub-problem in @sec-checkpointing.
+
+**Adaptive operator re-placement.** Topology changes — a
+vehicle drives through a tunnel, an edge gateway
+disconnects — currently fail the query. Re-placing operators
+when the topology shifts without losing in-flight state is the
+deepest research problem on the engine's roadmap.
+
+**Heterogeneous-hardware-aware placement.** The planner treats
+workers as comparably capable. Once the GPU/TPU backends
+mature (@sec-accelerators), the planner needs to know that
+"this worker has a GPU" and "this operator wants a GPU." The
+placement framework is ready; the cost model is not yet
+calibrated for it.
+
+**Coordinator merge.** As of May 2026, the Rust coordinator on
+the `ys-coordinator-integration` branch has not yet merged to
+`main`. Bringing it across — and the policy work it implies
+(failover, leader election, coordinator HA) — is on the
+critical path.
+
+---
+
+## 22.2 Multi-query optimisation {#sec-multi-query}
+
+The optimiser today (Chapter 9) optimises one query at a time.
+For workloads with hundreds of overlapping queries — say, hundreds
+of dashboards each computing a slightly different aggregation
+over the same input — there is significant opportunity to share
+work *across* queries.
+
+The classical approach is **multi-query optimisation** [@mqo-roy]:
+identify common subexpressions across queries, share their
+computation. A streaming variant is harder than the batch case
+because the queries arrive at different times and may have
+different windowing requirements, but the savings can be large.
+
+NebulaStream's optimiser does not do this today. It would be a
+substantial extension — a new phase that operates on a *set of
+queries* rather than a single query, plus runtime changes to
+share state structures between queries.
+
+---
+
+## 22.3 In-network processing {#sec-in-network}
+
+The vision statement promises "in-network processing" — pushing
+operators close to data sources to reduce the volume of data
+crossing the network. Implemented to its logical end, this
+means running selections and projections on the source's edge
+device, not the cloud worker.
+
+What is needed:
+
+- **An edge runtime.** A NebulaStream runtime light enough for
+  edge gateways or even sensor microcontrollers. This is not the
+  current `nes-single-node-worker` (too heavyweight); it is a
+  stripped-down sibling that can run a subset of operators in a
+  small footprint.
+- **Cost-aware operator placement.** A model of network bandwidth
+  cost so the optimiser can decide which operators to push
+  edge-ward.
+- **Coordination across the cloud-edge boundary.** State
+  synchronisation when an operator moves; reasoning about
+  watermark progress when some upstream is on a flaky network.
+
+The DIMA group has published research papers on each of these;
+the implementation is partial.
+
+---
+
+## 22.4 Heterogeneous accelerators (GPU, TPU, FPGA) {#sec-accelerators}
+
+Chapter 19 mentioned that GPU support exists as a research
+prototype outside the main tree, with TPU and FPGA support as
+aspirations. The infrastructure to *add* these — Nautilus's MLIR
+backend (Chapter 12) and the `pmr::memory_resource` extension
+(Chapter 4) — is in place; the backends themselves are work in
+progress.
+
+Two distinct sub-problems:
+
+- **Compiling operators to non-CPU targets.** MLIR has dialects
+  for SPIR-V (GPU), and prototype lowering passes from
+  Nautilus's IR to those dialects exist. Productionising them
+  requires substantial QA and likely more research.
+- **Runtime orchestration of heterogeneous hardware.** The
+  scheduler today does not know that thread A is on a GPU; it
+  treats all worker threads as equivalent. Heterogeneous-aware
+  scheduling needs new abstractions.
+
+This is a long-term research direction; expect incremental
+progress, not a single big release.
+
+---
+
+## 22.5 Adaptive runtime: changing plans on the fly {#sec-adaptive}
+
+The fifth pillar in the README is "Adaptive Resource
+Management — Reacts to topology or workload changes without
+interrupting queries." Today the engine's plan is fixed at query
+compile time; adapting to changing conditions requires stopping
+and restarting the query.
+
+What "adaptive" might mean concretely:
+
+- **Re-optimisation on workload shift.** A join whose hash side
+  was sized for 1 million rows now sees 100 million rows; the
+  optimiser should be able to swap to a different join algorithm
+  mid-flight.
+- **Operator migration.** An operator running on worker X
+  becomes too loaded; the engine moves it to worker Y without
+  losing state or data.
+- **Schema evolution.** A source's schema changes (a field is
+  added). Queries adapt without re-submission.
+
+Each is hard. Adaptive runtimes are an active research area;
+[@adaptive-streaming] is a survey of the state of the art.
+NebulaStream has not yet committed to a specific adaptive
+mechanism; the design space is open.
+
+---
+
+## 22.6 Late-data side outputs {#sec-late-data}
+
+A smaller but practically important gap. NebulaStream today
+silently drops tuples whose event time is older than the most
+recently fired window (Chapter 7). Flink, by contrast, supports
+*late-data side outputs* — a separate output stream where dropped
+tuples can be inspected and, if appropriate, re-incorporated.
+
+Adding side outputs to NebulaStream is mostly an engineering
+problem (the watermark and slice machinery is already
+slice-aware), but it is a useful feature that is currently
+absent.
+
+---
+
+## 22.7 Persistent state and checkpointing {#sec-checkpointing}
+
+Chapter 16's discussion of stateful operators noted that
+NebulaStream's state is in-memory only; on a worker crash, all
+state is lost. Production streaming engines almost universally
+support **checkpointing** — periodic snapshots of state to
+durable storage that can be replayed after a crash to resume the
+query at the most recent checkpoint.
+
+Adding checkpointing requires:
+
+- A serialisation format for hash maps and PagedVectors.
+- A coordination protocol that briefly pauses tuple processing
+  long enough to take a consistent snapshot (the Chandy-Lamport
+  algorithm [@chandy-lamport] in some adapted form).
+- A storage abstraction for the snapshots — local filesystem,
+  S3, etc.
+- A recovery path that reads the snapshot and brings up the
+  query at the right point in its history.
+
+This is a substantial undertaking and partly intersects with the
+distributed-execution work — checkpointing is more useful when
+distribution is the default.
+
+---
+
+## 22.8 The list goes on {#sec-list-goes-on}
+
+There is more. Briefly:
+
+- **Streaming SQL extensions** — `MATCH_RECOGNIZE` for pattern
+  detection, more sophisticated session-window definitions.
+- **More plugin extension points** — user-defined functions,
+  user-defined window types, user-defined aggregations.
+- **Better observability** — structured query plans visualised
+  in real time; predictive alerts on performance regressions.
+- **Cost-based optimisation** — when the rule-based optimiser of
+  Chapter 9 stops being enough.
+- **Approximate-query support** — sketches, count-min, HyperLogLog
+  as first-class operators.
+
+Each of these would expand the engine's capability surface; none
+is a single-PR change.
+
+---
+
+## Summary {#sec-ch22-summary}
+
+NebulaStream is a research engine with a substantial implementation
+behind it and a substantial implementation ahead. The largest open
+problem is full distributed execution (a QueryManager,
+inter-worker communication, fault recovery), with multi-query
+optimisation, in-network processing, accelerator backends,
+adaptive runtime, late-data side outputs, and checkpointing
+following close behind. The vision in Chapter 1 maps cleanly onto
+this list of work; the gap between vision and implementation is
+the engine's research agenda.
+
+---
+
+## Reading exercises {#sec-ch22-exercises}
+
+::: {.callout-important title="Reading exercise 22.1: read a design document"}
+Pick one of the recently dated design documents in
+`docs/design/`. Read it carefully. What problem is it solving?
+What is the proposed solution? Do you agree with the trade-offs?
+Write a one-page critique.
+:::
+
+::: {.callout-important title="Reading exercise 22.2: implement a tiny extension"}
+Pick the smallest item from the open-problem list — perhaps
+late-data side outputs — and sketch how you would implement it.
+Where in the code would you start? What new types would you
+introduce? What existing code would you need to change?
+:::
+
+::: {.callout-important title="Reading exercise 22.3: write the next book"}
+Of the items in this chapter, several would warrant their own
+book-length treatment. Identify two and outline what such a
+book would cover. The most likely candidates: distributed
+execution (a follow-on book once the QueryManager lands), and
+adaptive runtime (a research-monograph book covering the
+current literature plus NebulaStream's eventual approach).
+:::
+
+---
+
+## References {#sec-ch22-refs}
+
+- *NebulaStream design documents.*
+  `/Users/zeuchste/git/nebulastream/docs/design/`.
+- *QueryManager design.*
+  `/Users/zeuchste/git/nebulastream/docs/design/20240927_QueryManager.md`.
+- *Multi-query optimisation.* P. Roy et al., *Efficient and
+  Extensible Algorithms for Multi-Query Optimization.* SIGMOD
+  2000.
+- *Adaptive stream processing.* M. Hirzel et al., *A Catalog of
+  Stream Processing Optimizations.* ACM Comput. Surv., 2014.
+- *Chandy-Lamport snapshots.* K. M. Chandy, L. Lamport,
+  *Distributed Snapshots: Determining Global States of Distributed
+  Systems.* TOCS 1985.
+- *Flink checkpointing.* P. Carbone et al., *Lightweight
+  Asynchronous Snapshots for Distributed Dataflows.* arXiv 2015.

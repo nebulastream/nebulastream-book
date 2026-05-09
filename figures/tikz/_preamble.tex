@@ -1,0 +1,85 @@
+% Shared TikZ preamble for all book diagrams.
+% Each diagram .tex file does \input{_preamble.tex} before \begin{document}.
+
+\documentclass[tikz,border=8pt]{standalone}
+
+\usepackage[utf8]{inputenc}
+\usepackage{tikz}
+\usepackage{xcolor}
+\usepackage{amsmath}
+
+\usetikzlibrary{
+    arrows.meta,
+    positioning,
+    shapes.geometric,
+    shapes.misc,
+    decorations.pathmorphing,
+    backgrounds,
+    fit,
+    calc
+}
+
+% NebulaStream brand palette (matches www.nebula.stream)
+\definecolor{nesPrimary}{HTML}{9400A5}     % deep magenta-purple
+\definecolor{nesPrimaryDark}{HTML}{6E007B}
+\definecolor{nesPrimaryLight}{HTML}{E0B0E8}
+\definecolor{nesAccent}{HTML}{00BCD4}      % cyan
+\definecolor{nesInk}{HTML}{1B1B1F}
+\definecolor{nesCream}{HTML}{FAFAF7}
+\definecolor{nesBorder}{HTML}{D8CFE6}
+
+% Default fonts (PDF embeds these; SVG inherits text styling from CSS)
+\renewcommand{\familydefault}{\sfdefault}
+
+% Reusable styles
+\tikzset{
+    nes-box/.style={
+        rectangle, rounded corners=4pt,
+        draw=nesPrimary, line width=0.6pt,
+        fill=nesCream,
+        text=nesInk,
+        align=center,
+        font=\sffamily\small,
+        minimum height=8mm,
+        inner sep=4pt
+    },
+    nes-box-title/.style={
+        nes-box,
+        fill=nesPrimary,
+        text=white,
+        font=\sffamily\bfseries\small
+    },
+    nes-pill/.style={
+        rounded rectangle,
+        draw=nesPrimary, line width=0.6pt,
+        fill=nesCream,
+        font=\sffamily\small,
+        text=nesInk,
+        minimum height=8mm,
+        inner sep=4pt,
+        align=center
+    },
+    nes-decision/.style={
+        diamond, aspect=2,
+        draw=nesAccent, line width=0.6pt,
+        fill=nesCream,
+        font=\sffamily\small,
+        text=nesInk,
+        align=center,
+        inner sep=2pt
+    },
+    nes-arrow/.style={
+        -{Stealth[length=2.5mm]},
+        line width=0.6pt,
+        draw=nesInk
+    },
+    nes-arrow-dashed/.style={
+        nes-arrow,
+        dashed
+    },
+    nes-edge-label/.style={
+        font=\sffamily\scriptsize,
+        text=nesPrimaryDark,
+        sloped, above
+    }
+}

@@ -1,0 +1,14 @@
+Code excerpts from NebulaStream embedded in this book's listings
+remain under their original license — Apache License, Version 2.0
+— inherited from the upstream NebulaStream repository at:
+
+    https://github.com/nebulastream/nebulastream
+
+The full Apache 2.0 license text is available at:
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Each chapter cites the source file path and (where applicable) the
+line range of any code excerpts it contains. The pinned NebulaStream
+commit is recorded in the file PINNED_COMMIT at the root of this
+repository.

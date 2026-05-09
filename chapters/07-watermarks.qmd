@@ -1,0 +1,487 @@
+# Time, Watermarks, and Progress {#sec-watermarks}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+If a streaming engine has only one hard problem, it is this one.
+*When can I close a window?*
+
+A batch system can close a window because the data is finite: the
+input file ends, the partition is complete, the day is over.
+A streaming system cannot. Tuples can arrive out of order, sources
+can fall behind, the network can hiccup, and a tuple from "ten
+seconds ago" can show up after a tuple from "five seconds ago." The
+engine has to commit to closing a window at *some* point — otherwise
+it never produces a result — but committing too early loses data,
+and committing too late builds an unbounded backlog.
+
+Watermarks are the answer the streaming community has converged on
+[@dataflow-paper]. A watermark is a promise: "no event with a
+timestamp before *t* will arrive from this stream after this point."
+When all upstream operators have promised a watermark beyond *t*,
+the engine can safely close all windows that end at *t*.
+
+NebulaStream implements this with a four-tuple of identifiers
+attached to every `TupleBuffer`: `OriginId`, `SequenceNumber`,
+`ChunkNumber`, and `Watermark`. Three of the four are *not*
+timestamps. They exist because watermarks alone are not enough.
+
+This is one of the longest chapters in the book. The mechanism is
+intricate, and getting it wrong produces silently incorrect
+results — the worst kind of bug.
+
+---
+
+## 7.1 Two clocks: event time and processing time {#sec-two-clocks}
+
+Every tuple has, at least conceptually, two timestamps.
+
+**Event time.** When the event happened in the real world. A vehicle
+sensor records its speed at 10:00:00.123. The tuple representing
+that reading carries 10:00:00.123 as its event-time timestamp.
+
+**Processing time.** When the engine processed the tuple. The tuple
+might arrive at the sensor's TCP source at 10:00:00.456, get parsed
+and forwarded at 10:00:00.500, and reach a downstream operator at
+10:00:00.600. Each is a different processing-time timestamp.
+
+A query like `SELECT AVG(speed) GROUP BY vehicle WINDOW
+TUMBLING(1 SECOND)` is ambiguous unless you say which clock the
+window applies to. NebulaStream defaults to event time when a
+field is named (`WINDOW TUMBLING(creationTS, SIZE 1 SEC)`) and
+ingestion time (the source's processing-time stamp at ingest)
+when no field is named.
+
+Event-time windows are the interesting case. They are deterministic
+across replays — re-running the same input produces the same window
+contents — but they require watermarks to know when to fire.
+Processing-time windows are easy to fire (the local clock decides)
+but non-deterministic. Streaming engineers prefer event-time
+windows almost always [@streaming-systems]; this is what we will
+focus on.
+
+---
+
+## 7.2 The four progress identifiers {#sec-four-identifiers}
+
+Every `TupleBuffer` in NebulaStream carries four identifiers that
+together determine its position in the engine's progress lattice.
+They are defined in `nes-common/include/Identifiers/Identifiers.hpp`:
+
+```cpp
+// nes-common/include/Identifiers/Identifiers.hpp
+using OriginId = NESStrongType<uint64_t, struct OriginId_, 0, 1>;
+using SequenceNumber = NESStrongType<uint64_t, struct SequenceNumber_, 0, 1>;
+using ChunkNumber = NESStrongType<uint64_t, struct ChunkNumber_,
+                                  SequenceNumber::INVALID,
+                                  SequenceNumber::INITIAL>;
+```
+
+(`Watermark` is a `uint64_t` carrying the event-time stamp.)
+
+Why four, not just one? Each addresses a different mode of failure:
+
+**`OriginId`: which stream is this from?** A query joining two
+streams has tuples from two origins; the engine needs to track
+their watermarks separately, then take the minimum to advance the
+join's notion of progress. A `WindowedAggregation` produces a *new*
+origin for its output. Without distinct origin identifiers, the
+engine cannot reason about per-source progress.
+
+**`SequenceNumber`: which logical batch is this?** A source
+produces an ordered sequence of logical events. The sequence number
+is strictly monotonic, per origin. It is the engine's primary
+ordering key; gaps in the sequence indicate missing data.
+
+**`ChunkNumber`: which physical buffer within the batch?** A
+single logical event from a source may not fit in one buffer. A
+JSON record of 12 KiB exceeds the default 8 KiB buffer; it produces
+two physical buffers, both with the same `SequenceNumber` but
+different `ChunkNumber`s. The chunk number disambiguates them and
+records whether more chunks are coming.
+
+**`Watermark`: how far has time advanced?** The event-time stamp
+beyond which no earlier-event-time tuple is expected. Chunked
+correctly, this is the engine's key for closing windows.
+
+::: {.callout-note title="Example 7.1: a single buffer's progress 4-tuple"}
+A buffer freshly emitted by a TCP source might carry:
+
+```
+OriginId       = 7        # the seventh logical source
+SequenceNumber = 152       # 152nd batch from this source
+ChunkNumber    = 0        # first (and only) chunk of this batch
+Watermark      = 1715000000000  # nanoseconds since epoch
+isLastChunk    = true     # no more chunks for this sequence
+```
+
+A window operator reading this buffer learns: from origin 7, the
+152nd batch has arrived in full, with no event-time stamp earlier
+than 1715000000000 expected from this source.
+:::
+
+---
+
+## 7.3 Watermark advancement {#sec-watermark-advance}
+
+A source emits a watermark per buffer. The watermark is a promise
+about all *future* buffers from that source: "I will not produce a
+tuple with event time less than this watermark." Once promised, the
+source is bound to honour it.
+
+Sources use one of two strategies:
+
+- **Punctuated watermarks.** The watermark is set to the maximum
+  event time seen so far minus a slack `δ`. The slack accommodates
+  out-of-order tuples within a single source.
+- **Periodic watermarks.** The watermark is recomputed every *N*
+  buffers or every fixed interval, with the promise being made for
+  the period as a whole.
+
+NebulaStream's source implementations use both, configured per
+source type. The CSV file source, replaying historical data, uses
+the maximum-seen-event-time strategy because there is no real-world
+out-of-order; the file is what it is. A TCP source consuming a
+live feed uses a periodic strategy with a configurable slack.
+
+When a buffer with watermark `W` arrives at an operator, the
+operator advances its local notion of "watermark for origin O" to
+`max(current, W)`. For operators with multiple inputs (joins,
+unions), the *output* watermark is the *minimum* across origins.
+This minimum-advance is the engine's analogue of two-phase commit
+for time: you cannot advance past origin O until O is willing to
+advance with you.
+
+The component that implements this is `MultiOriginWatermarkProcessor`,
+defined in `nes-physical-operators/`:
+
+```cpp
+// nes-physical-operators/src/Watermark/MultiOriginWatermarkProcessor.cpp (sketch)
+Timestamp MultiOriginWatermarkProcessor::updateWatermark(
+    Timestamp ts, SequenceData sequenceData, OriginId origin) const
+{
+    for (size_t originIndex = 0; originIndex < origins.size(); ++originIndex) {
+        if (origins[originIndex] == origin) {
+            watermarkProcessors[originIndex]->emplace(sequenceData, ts.getRawValue());
+        }
+    }
+    return getCurrentWatermark();  // returns min across all origins
+}
+```
+
+Each origin has its own `NonBlockingMonotonicSeqQueue` —
+NebulaStream's lock-free ordered-queue primitive — that
+maintains the contiguous-prefix invariant we discussed in
+@sec-seq-windows. A `getCurrentWatermark()` call walks the
+queues, takes each origin's contiguous-prefix watermark, and
+returns the minimum. This is the engine's distributed-friendly
+progress lattice in 30 lines of code.
+
+---
+
+## 7.4 Why sequence numbers matter for windows {#sec-seq-windows}
+
+Watermarks alone are not enough to close a window correctly. The
+problem is that watermarks are a promise about the *future*, not
+the past. A window that should fire at watermark 1000 cannot fire
+just because some buffer arrived with watermark 1100; the engine
+needs to know that *all the buffers with event times below 1000
+have arrived*.
+
+This is where sequence numbers carry their weight. Sources commit
+not only to a watermark but to a contiguous sequence of buffers.
+If the source has emitted buffers with sequence numbers 0, 1, 2, 4
+(note: 3 is missing), the engine cannot close a window even if the
+watermark on buffer 4 says "everything before 1000 is here." Buffer
+3 has not yet arrived; until it does, the window is incomplete.
+
+The engine therefore tracks, per origin, the highest *contiguous*
+sequence number it has seen. Watermarks advance only as far as the
+contiguous prefix allows. A non-contiguous gap stalls progress.
+This is the engine's principal correctness mechanism: it prefers
+to halt rather than fire a window with missing data.
+
+::: {.callout-note title="Example 7.2: a missing sequence number"}
+Source emits buffers with sequence numbers 100, 101, 102, then
+104. Watermarks 100, 200, 300, 500. The engine's per-origin
+state is:
+
+```
+contiguousPrefix = 102   # 103 is missing
+maxSeenSequence  = 104
+maxSeenWatermark = 500
+effectiveWatermark = 300  # the watermark on contiguous prefix
+```
+
+A window that ends at event time 250 *can* fire (250 < 300).
+A window that ends at event time 400 *cannot* — even though the
+maxSeenWatermark is 500, sequence 103 might carry a tuple with
+event time 350. The engine waits.
+
+When sequence 103 arrives (with watermark, say, 400), the
+contiguous prefix advances to 104, the effective watermark
+advances to 500, and the window ending at 400 fires.
+:::
+
+---
+
+## 7.5 Chunks and the SequenceShredder {#sec-chunks}
+
+The chunk number handles a different problem: a single logical
+event whose physical encoding spans multiple buffers. A 30 KiB
+JSON record cannot fit in an 8 KiB buffer; it produces four
+buffers with the same `SequenceNumber` and `ChunkNumber`s 0, 1, 2,
+3, the last one marked `isLastChunk = true`.
+
+The `SequenceShredder` (described at length in
+`nes-input-formatters/README.md`) is the component that resolves
+multi-chunk events. It accumulates chunks per sequence number and
+emits the assembled logical record only when all chunks have
+arrived and `isLastChunk` is set. It also drives a small piece of
+state that downstream operators need:
+
+```cpp
+// from the watermarking design doc
+bool seenAllChunks(OriginId origin, SequenceNumber seq,
+                   ChunkNumber chunk, bool isLastChunk)
+{
+    auto& [lastChunk, numSeenChunks]
+        = getLastChunkNumberAndNumSeenChunks(seq);
+    if (isLastChunk) { lastChunk = chunk; }
+    ++numSeenChunks;
+    return numSeenChunks == lastChunk + 1;
+}
+```
+
+This is the engine's per-sequence completion check. A window
+operator that needs to know "have all chunks of sequence S
+arrived?" calls `seenAllChunks`. The function is a few lines of
+state per sequence number; in steady state, almost every sequence
+has a single chunk and the bookkeeping is cheap.
+
+---
+
+## 7.6 Window types {#sec-window-types}
+
+NebulaStream's window operators support three classical window
+shapes:
+
+**Tumbling.** Fixed-size, non-overlapping. `WINDOW TUMBLING(ts,
+SIZE 1 SEC)` produces non-overlapping 1-second buckets. Each tuple
+belongs to exactly one window.
+
+**Sliding.** Fixed-size, overlapping. `WINDOW SLIDING(ts, SIZE 5
+SEC, ADVANCE 1 SEC)` produces overlapping 5-second windows that
+advance every 1 second. Each tuple belongs to up to five windows.
+
+**Session.** Variable-size, gap-defined. A session window groups
+tuples whose timestamps are within `gap` of one another. Used for
+"all events from a single user's browsing session."
+
+The window-type hierarchy is in
+`nes-logical-operators/include/WindowTypes/Types/`. Each window
+type knows how to compute, for a given event-time stamp, the set
+of windows that contain that timestamp.
+
+---
+
+## 7.7 The build/probe split {#sec-build-probe}
+
+A windowed aggregation lowers, physically, into a *build* phase
+that accumulates state and a *probe* phase that emits results when
+windows close. The build phase is keyed on the grouping key plus
+the window identity; it maintains a hash map of partial results.
+The probe phase is triggered by watermark advancement: when the
+engine's notion of progress crosses a window's end timestamp, the
+probe walks the hash map and emits one tuple per window.
+
+The physical operators are in `nes-physical-operators/include/`:
+`WindowBuildPhysicalOperator` and `WindowProbePhysicalOperator`.
+A `WindowBasedOperatorHandler`
+(`nes-physical-operators/include/WindowBasedOperatorHandler.hpp`)
+coordinates the two: it owns the slice store, the watermark
+processors (one for build, one for probe), and the trigger logic.
+
+::: {.callout-tip title="Real-system reference: how Flink does this"}
+Flink uses a similar build/probe split, with watermarks driving
+window firing. The two important differences are:
+
+1. Flink stores window state in RocksDB by default, not in memory.
+   NebulaStream is in-memory only (Chapter 16). For workloads that
+   exceed memory, NebulaStream relies on the operator developer to
+   spill manually; Flink handles it transparently with state
+   backends.
+
+2. Flink uses a single watermark per parallel operator instance,
+   tracking progress through that instance's view of the world.
+   NebulaStream uses a per-origin watermark, allowing more
+   precise reasoning about multi-source joins. The trade-off is
+   bookkeeping complexity.
+:::
+
+---
+
+## 7.8 Watermarks across workers {#sec-cross-worker-watermarks}
+
+So far this chapter has described watermark propagation as if
+the whole query ran in one process. In a distributed deployment
+(Chapter 19), the operator graph spans workers, and watermarks
+have to cross the wire.
+
+The four-tuple progress identifiers we have been discussing —
+`OriginId`, `SequenceNumber`, `ChunkNumber`, `Watermark` — are
+exactly what makes this work cleanly. The information that
+matters at a network boundary is *what an upstream origin has
+promised*, not *which thread is processing what*. Promises
+travel as TupleBuffer metadata.
+
+When a `NetworkSink` (Chapter 19) ships a buffer over to a
+`NetworkSource` on another worker, the buffer's metadata —
+including the four progress identifiers — travels with it. The
+receiving side does not invent new origin or sequence numbers;
+it forwards the originating ones. A downstream operator on the
+receiving worker sees the same `OriginId` it would have seen if
+the whole query were single-node. The engine's notion of
+progress is consistent across the boundary.
+
+The implication: **a join on worker B between an origin from
+worker A and a local origin behaves correctly** because the
+`MultiOriginWatermarkProcessor` on worker B sees both origins'
+watermarks — the local one directly, the remote one via the
+NetworkSource — and takes the minimum. The minimum-of-origins
+discipline that holds within one worker holds across many.
+
+What does *not* travel automatically is *trust*. If worker A is
+unreachable (network partition), the receiving side cannot
+distinguish "A is slow and will catch up" from "A has crashed
+and will never catch up." The engine's current behaviour is
+conservative: a watermark that has not advanced is held to be
+not-yet-advanced, and downstream windows wait. Chapter 22
+discusses adaptive timeout policies as future work.
+
+::: {.callout-note title="Example 7.4: a windowed aggregation across workers"}
+A query reading from two sensors (sensor-A on worker A,
+sensor-B on worker B) and aggregating into one-second windows
+on worker C:
+
+```
+worker A: source(sensor-A) → NetworkSink(channel-1)
+                                            │
+worker B: source(sensor-B) → NetworkSink(channel-2)
+                                            │
+                                            ▼
+worker C: NetworkSource×2 → AggregationBuild → AggregationProbe → sink
+```
+
+Two `OriginId`s flow into worker C's aggregation. The
+`MultiOriginWatermarkProcessor` on the build side sees both;
+the aggregation does not fire windows until *both* origins'
+watermarks have crossed the window's end. If worker A's
+network briefly hiccups, worker C waits — windows from before
+the hiccup eventually fire when the buffers catch up; windows
+that depend on data that never arrives stall conservatively.
+:::
+
+## 7.9 Garbage collection: when state can be released {#sec-gc-state}
+
+A window's state — the partial aggregation hash map keyed on
+`(window-id, group-key)` — has to be released eventually, or the
+engine grows without bound.
+
+NebulaStream uses a *slice* abstraction: state is partitioned into
+slices keyed on a contiguous time range, and a slice can be
+released once the engine's watermark has advanced past the slice's
+end. The garbage collector (`garbageCollectSlicesAndWindows` on the
+`WindowBasedOperatorHandler`) walks slices on every probe pass and
+deallocates those that are guaranteed to never receive late tuples.
+
+The decision is conservative: a slice is released only when *all*
+upstream watermarks have passed it. Out-of-order tuples that arrive
+after release are dropped silently. NebulaStream does not, today,
+support late-data side outputs the way Flink does.
+
+---
+
+## Summary {#sec-ch7-summary}
+
+NebulaStream tracks progress with a four-tuple per `TupleBuffer`:
+`OriginId` distinguishes streams, `SequenceNumber` orders batches
+per origin, `ChunkNumber` distinguishes physical buffers belonging
+to the same logical batch, and `Watermark` carries the event-time
+promise. Watermarks advance through the operator graph by
+minimum-of-input, gated by the contiguous sequence-number prefix to
+ensure no missing batch is masked by a later watermark. Multi-chunk
+events are reassembled by the `SequenceShredder`. Window operators
+split into build and probe phases, with watermarks triggering
+probe and slice-based garbage collection releasing closed-window
+state. The mechanism is intricate but conservative: when in doubt,
+the engine waits.
+
+---
+
+## Reading exercises {#sec-ch7-exercises}
+
+::: {.callout-important title="Reading exercise 7.1: trace a window firing"}
+Run a windowed-aggregation systest in TRACE mode:
+
+```shell
+cmake-build-debug/systest/systest \
+    -t nes-systests/windows/SlidingWindowsWithGap.test:1 \
+    -- --logging.level=TRACE
+```
+
+Identify the log lines that show watermark advancement,
+sequence-number gaps (if any), and window fires. How many
+windows fire over the test's lifetime?
+:::
+
+::: {.callout-important title="Reading exercise 7.2: introduce out-of-order data"}
+Modify a tumbling-window test's input to introduce
+out-of-order events (event times 1, 2, 3, 5, 4, 6, …). What
+happens? Where does the engine handle the out-of-order? Look at
+the source's watermark generation strategy.
+:::
+
+::: {.callout-important title="Reading exercise 7.3: drop a sequence"}
+In a copy of an input file, remove the third record from a
+sliding-window test. Now sequence numbers are 1, 2, 4, 5, ….
+Watch what happens: the engine should stall (no windows fire)
+because the contiguous prefix never advances past 2. How does
+the engine recover? Hint: it does not, automatically. The user
+or framework has to provide a heartbeat or end-of-stream signal.
+:::
+
+::: {.callout-important title="Reading exercise 7.4: build a multi-source watermark"}
+Run a join systest:
+
+```shell
+cmake-build-debug/systest/systest \
+    -t nes-systests/operator/join/JoinMultipleStreams.test:1 \
+    -- --logging.level=TRACE
+```
+
+The join has two input origins. Trace the watermarks: when does
+the join's output watermark advance? You should see the
+minimum-across-origins behaviour clearly.
+:::
+
+---
+
+## References {#sec-ch7-refs}
+
+- *Watermarking design.*
+  `/Users/zeuchste/git/nebulastream/docs/technical/watermarking_progress_window_triggering.md`.
+- *Identifiers.* `nes-common/include/Identifiers/Identifiers.hpp`.
+- *Window types.*
+  `nes-logical-operators/include/WindowTypes/Types/`.
+- *WindowBuild / Probe physical operators.*
+  `nes-physical-operators/include/`.
+- *The Dataflow model.* T. Akidau et al., *The Dataflow Model: A
+  Practical Approach to Balancing Correctness, Latency, and Cost in
+  Massive-Scale, Unbounded, Out-of-Order Data Processing.* VLDB
+  2015. The canonical reference for watermark-based stream
+  processing.
+- *Streaming Systems.* Akidau, Chernyak, Lax. O'Reilly, 2018.
+  Chapters 3 and 4 cover watermarks at length.
+- *MillWheel.* T. Akidau et al., *MillWheel: Fault-Tolerant Stream
+  Processing at Internet Scale.* VLDB 2013.

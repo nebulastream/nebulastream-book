@@ -1,0 +1,291 @@
+/*-- scss:defaults --*/
+
+// NebulaStream brand palette (matched against www.nebula.stream)
+$nes-primary:        #9400A5;   // deep magenta-purple, the signature
+$nes-primary-dark:   #6E007B;
+$nes-primary-light:  #BB3DCB;
+$nes-accent:         #00BCD4;   // cyan accent for callouts (complements the purple)
+$nes-ink:            #1B1B1F;   // near-black for body text
+$nes-ink-soft:       #4A4A55;
+$nes-cream:          #FAFAF7;   // warm-white background
+$nes-card:           #FFFFFF;   // pure white card surface
+$nes-border:         #E5E2EE;
+$nes-code-bg:        #F4F1FA;   // very pale purple tint for inline code
+
+// Bootstrap variable overrides
+$primary:            $nes-primary;
+$secondary:          $nes-ink-soft;
+$body-color:         $nes-ink;
+$body-bg:            $nes-cream;
+$link-color:         $nes-primary-dark;
+$link-hover-color:   $nes-primary;
+$border-color:       $nes-border;
+$code-color:         $nes-primary-dark;
+$code-bg:            $nes-code-bg;
+
+// Typography — match nebula.stream's Montserrat + Roboto Slab choice
+$web-font-path:      "https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=Roboto+Slab:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap";
+$font-family-sans-serif:  "Montserrat", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+$font-family-serif:       "Roboto Slab", Georgia, serif;
+$font-family-monospace:   "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+$headings-font-family:    "Montserrat", sans-serif;
+$headings-font-weight:    700;
+$headings-color:          $nes-ink;
+
+// Components
+$border-radius:           0.75rem;   // matches feature cards on nebula.stream
+$border-radius-sm:        0.5rem;
+$border-radius-lg:        1rem;
+$box-shadow-sm:           0 0 0.5rem rgba(0,0,0,0.06);
+$box-shadow:              0 0 0.75rem rgba(0,0,0,0.08);
+$box-shadow-lg:           0 0 1.25rem rgba(0,0,0,0.12);
+
+/*-- scss:rules --*/
+
+@import url(#{$web-font-path});
+
+// Body
+body {
+    font-family: "Roboto Slab", Georgia, serif;
+    font-weight: 400;
+    font-size: 1rem;
+    line-height: 1.65;
+    color: $nes-ink;
+    background-color: $nes-cream;
+}
+
+// All headings in Montserrat for the brand match
+h1, h2, h3, h4, h5, h6,
+.h1, .h2, .h3, .h4, .h5, .h6 {
+    font-family: "Montserrat", sans-serif;
+    font-weight: 700;
+    color: $nes-ink;
+    letter-spacing: -0.01em;
+}
+
+h1, .h1 { font-size: 2.25rem; margin-top: 0; margin-bottom: 1.25rem; }
+h2, .h2 { font-size: 1.75rem; margin-top: 2.5rem; margin-bottom: 1rem;
+          padding-bottom: 0.4rem; border-bottom: 2px solid $nes-primary; }
+h3, .h3 { font-size: 1.35rem; margin-top: 2rem; }
+h4, .h4 { font-size: 1.1rem; }
+
+// Links
+a {
+    color: $nes-primary-dark;
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    transition: color 0.15s ease, border-color 0.15s ease;
+
+    &:hover {
+        color: $nes-primary;
+        border-bottom-color: $nes-primary;
+    }
+}
+
+// Sidebar
+.sidebar-navigation, #quarto-sidebar {
+    background: linear-gradient(180deg, $nes-cream 0%, lighten($nes-primary-light, 38%) 100%);
+    border-right: 1px solid $nes-border;
+}
+
+.sidebar-item-text {
+    font-family: "Montserrat", sans-serif;
+    font-size: 0.9rem;
+}
+
+.sidebar-item.active > .sidebar-item-container > a,
+.sidebar-link.active {
+    color: $nes-primary !important;
+    font-weight: 600;
+}
+
+// Title block — every element inside the gradient hero must be readable.
+// Quarto's chapter title block has more nested elements than the obvious
+// .title/.subtitle (header section numbers, kbd, code, anchor links).
+.quarto-title-block,
+.quarto-title-banner,
+.quarto-title {
+    border-radius: 0.75rem;
+    background: linear-gradient(135deg, $nes-primary 0%, $nes-primary-dark 100%);
+    color: white;
+    padding: 2rem 2rem;
+    margin-bottom: 2.5rem;
+    box-shadow: 0 0 1.25rem rgba(148, 0, 165, 0.18);
+
+    // Force every text-bearing element to be light, including the
+    // chapter-number prefix and any inline code in the title.
+    *, h1, .h1, .title, .subtitle, .author, .date,
+    .header-section-number, a, code {
+        color: white !important;
+        border-color: rgba(255,255,255,0.4) !important;
+    }
+    .subtitle, .author, .date, .quarto-categories {
+        color: rgba(255,255,255,0.92) !important;
+    }
+    a:hover { color: $nes-primary-light !important; }
+
+    // Inline code inside the title (e.g. `LogicalPlan`) gets a darker chip
+    // so it stays legible against the purple gradient.
+    code {
+        background-color: rgba(0,0,0,0.25) !important;
+        color: white !important;
+        border-radius: 0.25rem;
+        padding: 0.05em 0.35em;
+    }
+}
+
+// The chapter-number prefix lives inside h1.title — make sure it's light.
+.quarto-title-block .header-section-number,
+.quarto-title-banner .header-section-number,
+h1.title .header-section-number {
+    color: rgba(255,255,255,0.65) !important;
+    margin-right: 0.5em;
+}
+
+// Code blocks
+pre, code {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.85em;
+}
+
+pre {
+    background-color: $nes-ink;
+    color: #F8F8F2;
+    border-radius: 0.75rem;
+    padding: 1rem 1.25rem;
+    overflow-x: auto;
+    box-shadow: 0 0 0.5rem rgba(0,0,0,0.08);
+
+    code {
+        background: transparent;
+        color: inherit;
+        padding: 0;
+    }
+}
+
+p > code, li > code {
+    background-color: $nes-code-bg;
+    color: $nes-primary-dark;
+    padding: 0.1em 0.35em;
+    border-radius: 0.25rem;
+    font-weight: 500;
+}
+
+// Callout styling — match the nebula.stream feature-card aesthetic
+.callout {
+    border-radius: 0.75rem;
+    border: none;
+    box-shadow: 0 0 0.75rem rgba(0,0,0,0.06);
+    margin: 1.5rem 0;
+    overflow: hidden;
+}
+
+.callout-header {
+    border-radius: 0.75rem 0.75rem 0 0;
+    font-family: "Montserrat", sans-serif;
+    font-weight: 600;
+}
+
+// Notes — purple
+.callout-note {
+    border-left: 4px solid $nes-primary;
+    .callout-header { background-color: rgba($nes-primary, 0.08); }
+}
+
+// Tips ("Real-system reference") — cyan accent
+.callout-tip {
+    border-left: 4px solid $nes-accent;
+    .callout-header { background-color: rgba($nes-accent, 0.08); }
+}
+
+// Important ("Reading exercise") — primary purple, more saturated
+.callout-important {
+    border-left: 4px solid $nes-primary;
+    .callout-header {
+        background-color: $nes-primary;
+        color: white;
+    }
+}
+
+// Warning ("Caveat") — warmer
+.callout-warning {
+    border-left: 4px solid #E07B00;
+    .callout-header { background-color: rgba(224, 123, 0, 0.08); }
+}
+
+// Tables
+table {
+    border-collapse: collapse;
+    margin: 1.5rem 0;
+    border-radius: 0.5rem;
+    overflow: hidden;
+    box-shadow: 0 0 0.5rem rgba(0,0,0,0.06);
+
+    thead th {
+        background-color: $nes-primary;
+        color: white;
+        font-family: "Montserrat", sans-serif;
+        font-weight: 600;
+        padding: 0.6rem 0.9rem;
+        border: none;
+    }
+    tbody td {
+        padding: 0.55rem 0.9rem;
+        border-bottom: 1px solid $nes-border;
+    }
+    tbody tr:nth-child(even) td {
+        background-color: lighten($nes-primary-light, 40%);
+    }
+}
+
+// Blockquote (used in preface for the README quote)
+blockquote {
+    border-left: 4px solid $nes-primary;
+    background-color: lighten($nes-primary-light, 40%);
+    padding: 1rem 1.25rem;
+    border-radius: 0 0.5rem 0.5rem 0;
+    font-style: italic;
+    color: $nes-ink-soft;
+}
+
+// "On this page" TOC — purple
+#TOC, .toc-active {
+    a { color: $nes-ink-soft; }
+    a.active, a:hover { color: $nes-primary; }
+}
+
+// Search input
+input[type="search"] {
+    border-radius: 1.5rem;
+    border: 1px solid $nes-border;
+    padding: 0.45rem 1rem;
+
+    &:focus {
+        border-color: $nes-primary;
+        box-shadow: 0 0 0 3px rgba($nes-primary, 0.15);
+    }
+}
+
+// Section anchors hover
+.header-section-number {
+    color: $nes-primary;
+    margin-right: 0.4em;
+}
+
+// Mermaid diagrams — keep their default
+.mermaid {
+    margin: 1.5rem auto;
+    text-align: center;
+}
+
+// Page footer
+.page-footer, .quarto-page-footer {
+    background-color: $nes-ink;
+    color: rgba(255,255,255,0.7);
+    padding: 1.5rem 0;
+
+    a {
+        color: $nes-primary-light;
+        &:hover { color: white; }
+    }
+}

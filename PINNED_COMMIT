@@ -1,0 +1,4 @@
+origin/main @ 1a61e63d54
+# (the prior pin cd3ef68c73 is the user's local feature branch
+#  feat/scheduling-paper-latency-instrumentation, which is BEHIND
+#  origin/main on the distribution layer. The book targets main.)

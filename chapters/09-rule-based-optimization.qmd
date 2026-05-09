@@ -1,0 +1,304 @@
+# Rule-Based Logical Optimization {#sec-rule-based-optimization}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+The optimiser sits between the parser and the code generator. Its
+job is to rewrite a logical plan into a better one. "Better" can mean
+many things — fewer joins, smaller intermediate results, plans that
+parallelise more naturally — but in NebulaStream it means something
+quite specific.
+
+NebulaStream's optimiser is *rule-based*: it applies a fixed
+sequence of transformations, each a pure function from plan to
+plan. There is no cost model, no plan-space exploration, no
+estimation of cardinalities. Every query gets the same five rules
+applied in the same order. The system Volcano [@volcano-paper] would
+have called such a thing a "preprocessor" rather than an optimiser.
+
+This chapter walks through that preprocessor. We will not pretend
+it is more sophisticated than it is. The interesting part is not
+the rules themselves — they are simple — but *why* the engine
+chose simplicity here.
+
+---
+
+## 9.1 The five rules {#sec-five-rules}
+
+The entry point is `QueryOptimizer::optimize`, in
+`nes-query-optimizer/src/QueryOptimizer.cpp`. We saw it in
+Chapter 2:
+
+```cpp
+// nes-query-optimizer/src/QueryOptimizer.cpp
+LogicalPlan QueryOptimizer::optimize(
+    const LogicalPlan& plan,
+    const QueryOptimizerConfiguration& defaultQueryOptimization)
+{
+    DecideJoinTypesRule joinTypeDecider(defaultQueryOptimization.joinStrategy);
+    DecideMemoryLayoutRule memoryLayoutDecider;
+    constexpr RedundantUnionRemovalRule redundantUnionRemovalRule{};
+    constexpr RedundantProjectionRemovalRule redundantProjectionRemovalRule{};
+    constexpr TypeInferenceRule typeInferenceRule{};
+
+    auto optimizedPlan = LogicalPlan{plan};
+    redundantProjectionRemovalRule.apply(optimizedPlan);
+    redundantUnionRemovalRule.apply(optimizedPlan);
+    typeInferenceRule.apply(optimizedPlan);
+    optimizedPlan = joinTypeDecider.apply(optimizedPlan);
+    optimizedPlan = memoryLayoutDecider.apply(optimizedPlan);
+    return optimizedPlan;
+}
+```
+
+Five rules, applied in order. The order matters — let us go
+through them.
+
+**1. RedundantProjectionRemoval.** A projection that selects every
+field of its input in input order is a no-op. If the binder
+produced one (and it often does, for the `SELECT *` shape), this
+rule deletes it.
+
+**2. RedundantUnionRemoval.** A union with one input is just that
+input. Eliminate the union node.
+
+**3. TypeInference.** Walk the plan and annotate every operator
+with its input and output schema. This rule does not transform the
+plan structurally; it decorates it. Subsequent rules and the lowering
+phase rely on these annotations.
+
+**4. DecideJoinTypes.** For each join in the plan, choose between
+hash join, nested-loop join, and any future join implementation.
+This is the most logically complex rule; we examine it in
+@sec-join-decision.
+
+**5. DecideMemoryLayout.** Choose row vs. columnar layout for each
+operator's output. Currently always row (Chapter 4); the
+infrastructure exists for future per-operator decisions.
+
+That is all. No predicate pushdown. No projection pushdown. No
+join reordering. No common-subexpression elimination. The optimiser
+has no opinion on those questions.
+
+---
+
+## 9.2 Why no cost-based optimisation? {#sec-why-no-cbo}
+
+Most relational databases have a cost-based optimiser. They have
+one because a join over a billion rows of `customers` and a million
+rows of `orders` can have wildly different costs depending on which
+side is the build, whether indexes apply, and what predicates can
+be pushed down. The optimiser's job is to navigate that
+combinatorial space.
+
+NebulaStream's workloads typically do not look like that. A
+streaming query is small (tens of operators, not hundreds), shallow
+(rarely more than two joins), and bounded in fan-out (the schemas
+of streaming sources are usually narrow). The space the optimiser
+would need to navigate is small enough that the right plan is
+mostly the obvious plan.
+
+There are also two specifically streaming reasons. First, statistics
+are hard to maintain over an unbounded input — the cardinality
+estimate for "the number of vehicles" is a moving target.
+Second, the cost of a wrong plan is amortised over the query's
+runtime; a streaming query running for a month will eventually
+pay back any one-time optimisation overhead, but it will not
+benefit from the optimiser re-considering after the workload
+shifts (and re-considering during operation is its own problem,
+as Chapter 22 discusses).
+
+The pragmatic conclusion is that a rule-based preprocessor is
+sufficient *for this engine, today*. As NebulaStream takes on
+larger queries — multi-join analytical streams over many
+heterogeneous sources — that conclusion may need to be revisited.
+
+::: {.callout-tip title="Real-system reference: when CBO matters"}
+PostgreSQL, Oracle and SQL Server invest heavily in cost-based
+optimisation because their workloads include OLAP queries with
+five-way joins and complex predicates. Apache Calcite provides
+a CBO framework that Flink uses for its SQL surface.
+
+Materialize uses no traditional CBO either, for similar reasons
+to NebulaStream: streaming queries have less plan-space to
+search, and the cost of a wrong plan is amortised. Hyper and
+Umbra do CBO at runtime, recompiling when the cost model says a
+better plan exists. NebulaStream sits at the simpler end of this
+spectrum.
+:::
+
+---
+
+## 9.3 The join-type decision {#sec-join-decision}
+
+The most algorithmically interesting rule is `DecideJoinTypes`. It
+inspects each `JoinLogicalOperator` and chooses an implementation
+type, recording the decision in a `JoinImplementationTypeTrait`.
+
+The current logic is structural rather than statistical. Look at
+`DecideJoinTypesRule.cpp`:
+
+```cpp
+// nes-query-optimizer/src/Rules/Static/DecideJoinTypesRule.cpp
+bool shallUseHashJoin(const LogicalFunction& joinFunction)
+{
+    auto allowedLogicalFunction = [](const LogicalFunction& logicalFunction)
+    {
+        return logicalFunction.tryGetAs<AndLogicalFunction>().has_value()
+            or logicalFunction.tryGetAs<EqualsLogicalFunction>().has_value()
+            or logicalFunction.tryGetAs<OrLogicalFunction>().has_value()
+            or logicalFunction.tryGetAs<FieldAccessLogicalFunction>().has_value();
+    };
+    // ... BFS traversal to verify all functions are allowed ...
+    return true;  // Default to HashJoin if structure supports it
+}
+```
+
+The question the rule answers is not "is hash join faster" but
+"is hash join *applicable*." A hash join requires the predicate to
+be a conjunction of equalities on field accesses; anything else
+(a band predicate, an inequality, a UDF) forces the engine to fall
+back to a nested-loop join.
+
+The rule walks the join's predicate. If every leaf is a field
+access and every internal node is `AND`, `OR` or `=`, the rule
+flags the join for hash. Otherwise nested-loop.
+
+This is a structural decision, not a cost decision. It is also the
+right decision for the workloads NebulaStream targets: streaming
+joins almost always *are* equi-joins on keyed fields, so the rule
+chooses hash join almost always. The nested-loop fallback exists
+for safety, not because anyone wants to use it.
+
+::: {.callout-note title="Example 9.1: an inequality forces nested-loop"}
+The query
+
+```sql
+SELECT * FROM trips JOIN tolls
+  ON trips.gantry = tolls.gantry AND trips.timestamp BETWEEN tolls.start AND tolls.end
+INTO billed_trips;
+```
+
+contains a `BETWEEN` predicate. The rule sees a `LessEquals` (or
+similar inequality) leaf, finds it not in the allowed set, and
+returns `false`. The join is tagged for nested-loop execution.
+
+This will be slow on large inputs. A future optimiser would
+recognise the band-join pattern and use a specialised
+band-join algorithm (Chapter 22 mentions this as open work).
+:::
+
+---
+
+## 9.4 Static vs. semantic rules {#sec-static-semantic}
+
+The rules in `nes-query-optimizer/include/Rules/Static/` are *pure
+syntactic* rewrites: they look at the plan structure and rewrite
+it. They do not need to consult any external state. The five rules
+called by `QueryOptimizer::optimize` are static rules.
+
+There is also a directory `nes-query-optimizer/include/Rules/Semantic/`
+containing rules like `TypeInferenceRule`,
+`SourceInferenceRule`, `SinkBindingRule`, `OriginIdInferenceRule`.
+These are typically called inside the binder (Chapter 5) rather
+than the optimiser proper, because they consult the source/sink
+catalog and the schema of catalog-resolved sources. The
+distinction is more historical than principled — both are
+plan-to-plan transformations — but it shows up in the directory
+layout.
+
+For our purposes, both kinds are "rules": pure functions that
+transform the plan.
+
+---
+
+## 9.5 The trait set, revisited {#sec-trait-revisited}
+
+We met the trait set in Chapter 6. Optimiser rules are the
+principal users. Each rule attaches a trait to the operators it
+touches, recording the decision the rule made:
+
+| Rule | Trait it attaches |
+|---|---|
+| TypeInference | input/output schema annotations |
+| OriginIdInference | `OriginIdTrait` per stateful operator |
+| DecideJoinTypes | `JoinImplementationTypeTrait` |
+| DecideMemoryLayout | `MemoryLayoutTrait` |
+
+Downstream — particularly in the lowering phase (Chapter 10) —
+the lowering rules read these traits to decide which physical
+operator to instantiate. Hash-join build vs. nested-loop build is
+one read of the join trait.
+
+The trait pattern is what makes the optimiser composable. Each
+rule is independent of the others; they communicate through
+traits rather than through implicit structure. Adding a new rule
+that attaches a new trait does not invalidate existing rules.
+
+---
+
+## Summary {#sec-ch9-summary}
+
+NebulaStream's optimiser is a fixed sequence of five rules, applied
+in order, each a pure function. There is no cost-based optimisation,
+no plan-space exploration, and no statistics — a deliberate choice
+matching the engine's typical workload of small, shallow streaming
+queries. The most non-trivial rule, `DecideJoinTypes`, makes a
+structural rather than statistical decision: hash join if the
+predicate is an equi-join, nested-loop otherwise. Rules communicate
+their decisions through a trait set attached to operators, which
+the lowering phase (Chapter 10) reads to choose physical
+implementations.
+
+---
+
+## Reading exercises {#sec-ch9-exercises}
+
+::: {.callout-important title="Reading exercise 9.1: trace projection elimination"}
+Add a `SELECT *` over a single source and run with TRACE
+logging:
+
+```sql
+SELECT * FROM demo INTO result;
+```
+
+The binder produces a redundant identity projection. The
+`RedundantProjectionRemovalRule` deletes it. Find the log line
+that records the deletion. The plan after optimisation should
+have one fewer operator than before.
+:::
+
+::: {.callout-important title="Reading exercise 9.2: force a nested-loop join"}
+Write a query whose join predicate is an inequality:
+
+```sql
+SELECT * FROM trips, gantries
+  WHERE trips.coord_x BETWEEN gantries.x_min AND gantries.x_max
+INTO matched;
+```
+
+Submit and observe the plan. The
+`JoinImplementationTypeTrait` should be `NESTED_LOOP_JOIN`. What
+is the runtime difference between this and an equi-join over
+similar input? Run a benchmark to confirm.
+:::
+
+::: {.callout-important title="Reading exercise 9.3: add a sixth rule"}
+Sketch a `RedundantSelectionRemovalRule` that deletes a
+selection whose predicate is a tautology (always true). Where
+would it fit in `QueryOptimizer::optimize`? Which traits would
+it preserve?
+:::
+
+---
+
+## References {#sec-ch9-refs}
+
+- *QueryOptimizer.* `nes-query-optimizer/src/QueryOptimizer.cpp`.
+- *DecideJoinTypesRule.*
+  `nes-query-optimizer/include/Rules/Static/DecideJoinTypesRule.hpp`.
+- *Volcano.* G. Graefe. *Volcano — An Extensible and Parallel Query
+  Evaluation System.* IEEE TKDE, 1994.
+- *Cascades.* G. Graefe. *The Cascades Framework for Query
+  Optimization.* IEEE Data Eng. Bull., 1995.
+- *Apache Calcite.* E. Begoli et al., SIGMOD 2018.

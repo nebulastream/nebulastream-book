@@ -1,0 +1,40 @@
+% Chapter 15 — Worker loop
+\input{_preamble.tex}
+
+\begin{document}
+\begin{tikzpicture}[node distance=10mm and 12mm]
+
+    \node[nes-pill, fill=nesPrimary, text=white] (Start) {Worker thread starts};
+    \node[nes-decision, below=of Start] (Wait) {tasksAvailable\\.try\_acquire\_for(100\,ms)};
+    \node[nes-box, right=22mm of Wait] (Read) {Read from internal first;\\fall back to admission};
+    \node[nes-decision, below=of Wait] (Stop) {stop\_token\\requested?};
+    \node[nes-pill, fill=nesInk, text=white, below=of Stop] (Exit) {Worker exits};
+
+    \node[nes-box, right=22mm of Read] (Visit) {std::visit on\\Task variant};
+
+    \node[nes-box, above right=2mm and 16mm of Visit] (Work) {Run the pipeline\\operator};
+    \node[nes-box, right=16mm of Visit] (Pending) {Check pendingTasks;\\re-emit or finalise};
+    \node[nes-box, below right=2mm and 16mm of Visit] (Lifecycle) {Mutate query\\catalog};
+
+    \node[nes-box, below=of Visit] (Emit) {Emit follow-up via\\addInternalTaskNonBlocking};
+
+    \draw[nes-arrow] (Start) -- (Wait);
+    \draw[nes-arrow] (Wait.east) -- node[nes-edge-label]{acquired} (Read.west);
+    \draw[nes-arrow] (Wait.south) -- node[nes-edge-label]{timeout} (Stop.north);
+    \draw[nes-arrow] (Stop.west) to[bend left=45] node[nes-edge-label]{no} (Wait.west);
+    \draw[nes-arrow] (Stop.south) -- node[nes-edge-label]{yes} (Exit.north);
+
+    \draw[nes-arrow] (Read) -- (Visit);
+
+    \draw[nes-arrow] (Visit) -- node[nes-edge-label, above]{WorkTask} (Work);
+    \draw[nes-arrow] (Visit) -- node[nes-edge-label]{PendingPipelineStop} (Pending);
+    \draw[nes-arrow] (Visit) -- node[nes-edge-label, below]{Start/StopQuery} (Lifecycle);
+
+    \draw[nes-arrow] (Work) -- (Emit.north);
+    \draw[nes-arrow] (Pending.south) to[bend left=20] (Emit.east);
+    \draw[nes-arrow] (Lifecycle.south) to[bend right=20] (Emit.east);
+
+    \draw[nes-arrow] (Emit.west) to[bend right=22] (Wait.south west);
+
+\end{tikzpicture}
+\end{document}

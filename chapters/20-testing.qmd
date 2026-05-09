@@ -1,0 +1,336 @@
+# Testing: Unit, Integration, and Systests {#sec-testing}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+A streaming engine has more interesting failure modes than most
+software. Watermarks can be off-by-one. Window state can leak.
+Joins can produce duplicates. JIT-compiled code can produce wrong
+answers that depend on the input distribution. Without good tests,
+none of this is caught before users see wrong results.
+
+NebulaStream's test infrastructure is in three layers:
+
+- **Unit tests** — Google Test on individual classes, in
+  per-module `tests/` directories.
+- **Integration tests** — multi-component tests using the
+  `nes-coordinator-test-util` helpers.
+- **System tests (systests)** — declarative `.test` files that
+  describe a query plus expected output, run end-to-end against
+  the worker.
+
+The systests are the most distinctive piece. This chapter walks
+through each layer with the most attention on systests.
+
+---
+
+## 20.1 The unit-test setup {#sec-unit-tests}
+
+Each `nes-*` module that has tests has them in a `tests/`
+subdirectory. The CMake helpers in
+`/Users/zeuchste/git/nebulastream/cmake/NebulaStreamTest.cmake`
+make registration trivial:
+
+```cmake
+# cmake/NebulaStreamTest.cmake
+function(add_nes_integration_test)
+    add_executable(${ARGN})
+    set(TARGET_NAME ${ARGV0})
+    add_dependencies(integration_tests ${TARGET_NAME})
+    target_precompile_headers(${TARGET_NAME} REUSE_FROM nes-common)
+    target_link_libraries(${TARGET_NAME} nes-coordinator-test-util)
+    gtest_discover_tests(${TARGET_NAME} WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+endfunction()
+```
+
+There are three test helpers, distinguished by what they link
+against:
+
+- `add_nes_unit_test` — links `nes-data-types`. The smallest
+  surface; for tests of pure-function utilities like type
+  inference or schema manipulation.
+- `add_nes_common_test` — links `nes-common`. For tests that
+  need logging, identifiers, exceptions.
+- `add_nes_integration_test` — links `nes-coordinator-test-util`.
+  For tests that need the full engine, with fake sources and
+  sinks.
+
+Tests run through CTest:
+
+```shell
+ctest --test-dir cmake-build-debug -j --output-on-failure
+ctest --test-dir cmake-build-debug -R "DecideJoinTypesTest" --output-on-failure
+```
+
+The discovery is automatic — `gtest_discover_tests` finds all the
+`TEST` and `TEST_F` macros in the binary and registers them with
+CTest at build time.
+
+Most operator-internal logic is unit-tested. The pace of unit
+tests is high; you can run all of them in under a minute.
+
+---
+
+## 20.2 The systest framework {#sec-systests}
+
+The interesting layer is the systest framework. Systests are
+declarative `.test` files that describe a complete query — schema,
+data, query, expected output — in a single readable document. The
+worker runs the query against a fake source carrying the inline
+data and the test framework checks the actual output against the
+expected.
+
+A small example:
+
+```sql
+# nes-systests/tuples/FiveTuples.test
+# name: sources/FiveTuples.test
+# description: Simple source/buffer tests
+# groups: [Tuples]
+
+CREATE LOGICAL SOURCE fiveTuples(field_1 UINT64 NOT NULL);
+CREATE PHYSICAL SOURCE FOR fiveTuples TYPE File;
+ATTACH INLINE
+1
+2
+3
+4
+5
+
+CREATE SINK sinkFiveTuples(...)  TYPE File;
+SELECT field_1 FROM fiveTuples INTO sinkFiveTuples;
+----
+1
+2
+3
+4
+5
+```
+
+Three sections separated by `----`:
+
+1. **Metadata** (`# name:`, `# description:`, `# groups:`).
+2. **Setup + query** (the SQL, with `ATTACH INLINE` to embed input
+   data directly in the file).
+3. **Expected output** (after `----`).
+
+The framework runs the query and asserts the actual output
+matches the expected, ignoring trailing whitespace.
+
+This format is brilliant for streaming engines. Streaming queries
+have multiple inputs, time-dependent behaviour, and complex
+expected outputs that are tedious to express in unit tests.
+Putting everything in one file — schema, input, query, expected
+— makes the test self-documenting.
+
+---
+
+## 20.3 The systest CLI {#sec-systest-cli}
+
+Systests run through a dedicated `systest` executable. From
+CLAUDE.md:
+
+```shell
+# Build the systest binary
+cmake --build cmake-build-debug --target systest
+
+# Run a single systest file
+cmake-build-debug/systest/systest -t nes-systests/operator/join/HashJoin.test
+
+# Run a specific case within a file
+cmake-build-debug/systest/systest \
+    -t nes-systests/function/arithmetical/FunctionAdd.test:1
+```
+
+The `:N` suffix runs only the Nth query in the file. Files with
+multiple queries are common — a single `.test` file might contain
+five variations on a theme, each numbered.
+
+The systest binary builds the engine in-process and runs each
+query against the test's input. Setup and teardown are
+test-local; failures are reported per-query with a diff against
+the expected output.
+
+You can pass worker configuration overrides after `--`:
+
+```shell
+cmake-build-debug/systest/systest \
+    -t nes-systests/operator/join/JoinMultipleStreams.test:1 \
+    -- --worker.default_query_execution.execution_mode=INTERPRETER
+```
+
+This is what most of this book's reading exercises do. Switching
+between COMPILER and INTERPRETER mode is the primary tool for
+isolating JIT bugs from operator-logic bugs.
+
+---
+
+## 20.4 Multi-worker testing {#sec-multi-worker-testing}
+
+The systest harness supports running queries against multiple
+worker processes simultaneously. The CI configuration starts
+parallel workers in Docker containers — vanilla, profiler-
+instrumented, coverage-instrumented, sanitizer-equipped — on
+ports 8080, 8081, 8082, 8083. A single `.test` file's queries
+are dispatched across them; the same query runs in each worker
+and the framework asserts that all workers produce the same
+expected output.
+
+This is *not yet* the same thing as a true distributed-systest
+suite. It is parallel execution of single-node queries against
+identical-but-instrumented workers, primarily to catch
+sanitizer-only bugs. Genuine multi-worker scenarios — where
+operators of one query are placed across multiple workers
+(Chapter 19) — are exercised through dedicated coordinator
+integration tests that live outside `nes-systests/`.
+
+The closest thing to a distributed scenario in the systest
+suite as of `origin/main` is
+`nes-systests/benchmark/ClusterMonitoring.test`, a multi-stream
+monitoring workload modelled on the Google cluster-trace
+dataset. Even this runs single-node by default; the cluster
+shape comes from the input data, not from running across
+workers.
+
+Filling the distributed-systest gap is on the engine's
+near-term roadmap (Chapter 22 mentions it as one of the items
+the QueryManager work blocks).
+
+## 20.5 Group tags and CI integration {#sec-systest-groups}
+
+The metadata header allows tests to belong to *groups*. The
+group tag `[fast]` means the test runs in the fast lane of CI,
+which executes on every PR. `[nightly]` (or `.test_nightly`
+suffix) means the test runs only on nightly builds. Other tags
+(e.g., `[legacy]`, `[join]`) help filter test runs:
+
+```shell
+# Run all tests in the join group
+cmake-build-debug/systest/systest --groups=join
+```
+
+The CI matrix from CLAUDE.md is detailed: every PR triggers
+format check → smoke tests → full matrix (x86_64/arm64 ×
+libcxx/libstdcxx × Debug/RelWithDebInfo/Release × address/
+undefined/thread/none sanitizers) plus clang-tidy diff plus code
+coverage. The systests run within this matrix; sanitizer-equipped
+runs catch a lot of bugs that pure unit tests miss.
+
+---
+
+## 20.5 Why systests are documentation {#sec-systests-as-docs}
+
+The systests double as living documentation of the engine's
+behaviour. A new contributor wanting to know "what is the exact
+syntax for a windowed aggregation" can grep the systests and find
+a working example. We have, throughout this book, used systest
+file paths as the targets of "Reading Exercise" sidebars,
+because:
+
+- Every systest file is self-contained.
+- Every systest file is tested in CI; it cannot be wrong without
+  CI noticing.
+- Every systest file is a real example of a real query that the
+  engine actually runs.
+
+For an instructor using this book as a course text, the systests
+are an inexhaustible source of homework: every test file is a
+small puzzle the student can run, modify, and predict the output
+for.
+
+---
+
+## 20.6 What is hard to test {#sec-hard-to-test}
+
+A few testing problems have no clean solution today:
+
+- **Timing-dependent behaviour.** A windowed aggregation's exact
+  firing time depends on real-time progress; deterministic tests
+  use synthetic timestamps embedded in the input, but
+  edge-case timing bugs can still escape.
+- **Long-running workloads.** Memory leaks that show up only after
+  hours of continuous operation are not caught by tests that run
+  for seconds.
+- **Concurrency bugs in the JIT.** Race conditions in JIT-compiled
+  code may not reproduce reliably; ThreadSanitizer helps but is
+  not a silver bullet.
+- **Numerical edge cases in user-defined functions.** A UDF that
+  divides by a value that happens to be zero only on one machine's
+  data is hard to test without running on that data.
+
+The engine compensates with the sanitizer matrix and a
+substantial nightly test budget, but the testing-frontier
+problems are real.
+
+---
+
+## Summary {#sec-ch20-summary}
+
+NebulaStream's testing has three layers: unit tests via Google
+Test in per-module `tests/` directories; integration tests via
+`nes-coordinator-test-util`; and system tests via the declarative
+`.test` file format that describes schema, input data, query, and
+expected output in a single document. Systests double as
+self-documenting examples and are the primary target of this
+book's reading exercises. The CI matrix runs the full test suite
+across architectures, libcxx flavours, build types, and
+sanitizers, providing strong coverage even of timing-sensitive
+bugs that pure unit tests would miss.
+
+---
+
+## Reading exercises {#sec-ch20-exercises}
+
+::: {.callout-important title="Reading exercise 20.1: read three systests"}
+Open three systests in `nes-systests/`:
+
+- `nes-systests/tuples/FiveTuples.test` (a trivial source-to-sink
+  test).
+- `nes-systests/operator/join/JoinMultipleStreams.test` (a
+  multi-stream join).
+- A windowed-aggregation test of your choice from
+  `nes-systests/windows/`.
+
+For each, identify the schema, the input, the query, and the
+expected output. Trace through what the engine does to produce
+the expected output.
+:::
+
+::: {.callout-important title="Reading exercise 20.2: write your own"}
+Construct a `.test` file for a query of your own design. Stay
+small: 5 input rows, one filter, one projection. Run it:
+
+```shell
+cmake-build-debug/systest/systest -t /path/to/my-test.test
+```
+
+Iterate until it passes. Then add a deliberate bug — predict an
+output that is wrong by one row — and run again. The diff in
+the failure message is exactly what you would see on a real CI
+failure.
+:::
+
+::: {.callout-important title="Reading exercise 20.3: systests across modes"}
+Pick any operator systest. Run it three times: COMPILER mode,
+INTERPRETER mode, and with one of the sanitizers enabled. Are
+the answers the same? They should be. If they are not, you have
+found a real bug.
+:::
+
+---
+
+## References {#sec-ch20-refs}
+
+- *Systest design.*
+  `/Users/zeuchste/git/nebulastream/docs/design/20240724_system_level_tests.md`.
+- *Systest user guide.*
+  `/Users/zeuchste/git/nebulastream/docs/development/systests.md`.
+- *Test CMake helpers.*
+  `/Users/zeuchste/git/nebulastream/cmake/NebulaStreamTest.cmake`.
+- *Google Test.* Google. *GoogleTest documentation.*
+  `https://google.github.io/googletest/`.
+- *Sanitizers.* K. Serebryany et al. *AddressSanitizer: A Fast
+  Address Sanity Checker.* USENIX ATC 2012.
+- *Property-based testing in databases.* T. Crain et al. *Testing
+  Database Systems with QuickCheck.* CIDR 2018. — for a different
+  testing philosophy.

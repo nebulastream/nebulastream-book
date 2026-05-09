@@ -1,0 +1,611 @@
+# Distributed Deployment: Cloud, Fog, Edge {#sec-distributed-deployment}
+
+::: {.callout-note title="Status: deep rewrite 2026-05 — code-verified against `origin/main`"}
+This chapter has been rewritten end-to-end against the actual
+distributed source on `origin/main`. An earlier version
+(2026-05-08) treated distribution as research roadmap on the
+basis of 2024 design documents. That treatment was wrong; the
+distributed layer was already shipping. This rewrite is built
+from a careful read of `nes-distributed/`, `nes-network/`, and
+the `Placement/` subtree of `nes-query-optimizer/`.
+:::
+
+NebulaStream's vision in Chapter 1 promised cloud-edge-sensor
+deployments. Earlier readers of this book might have been
+forgiven for assuming, from the chapter status callouts, that
+such deployments were research roadmap. They are not. As of
+`origin/main` the engine has a working distributed layer:
+operators are placed across workers by a mixed-integer linear
+program, network channels carry tuples between them over a
+Rust-implemented data plane, and the coordinator aggregates
+distributed query status with a clean precedence rule for
+failure modes.
+
+This chapter walks through the implementation. It is one of the
+two longest chapters in the book — alongside Chapter 15 — because
+distribution is structurally the largest single piece of the
+engine's recent evolution.
+
+---
+
+## 19.1 The five new types {#sec-distributed-types}
+
+Five types in `nes-distributed/include/` carry the distributed
+abstractions. The signatures matter because every other
+distributed component plugs into them.
+
+**`DistributedLogicalPlan`** is the post-placement plan. It maps
+each worker to the local logical plans that will run on that
+worker, and keeps the original global plan for reference:
+
+```cpp
+// nes-distributed/include/DistributedLogicalPlan.hpp (sketch)
+class DistributedLogicalPlan {
+    std::unordered_map<Host, std::vector<LogicalPlan>> localPlansByHost;
+    LogicalPlan globalPlan;
+    DistributedQueryId id;
+public:
+    const std::vector<LogicalPlan>& operator[](const Host& host) const;  // throws out_of_range
+    const LogicalPlan& getGlobalPlan() const;
+    DistributedQueryId getId() const;
+};
+```
+
+A worker's view of the world is the slice it gets through the
+`operator[]` lookup — typically a single local `LogicalPlan` per
+worker, but a worker can host several logical plans of the same
+distributed query if the placer fragmented the global plan that
+way.
+
+**`DistributedQuery`** is the runtime counterpart: it tracks
+which local query IDs are running on which workers.
+
+```cpp
+// nes-distributed/include/DistributedQuery.hpp (sketch)
+class DistributedQuery {
+    std::unordered_map<Host, std::vector<QueryId>> queriesByHost;
+public:
+    auto iterate() const;  // flattens to (Host, QueryId) tuples
+};
+```
+
+The flattening helper `iterate()` is what the coordinator's
+polling loop uses: one pass through every (worker, local-query)
+pair, collecting status from each.
+
+**`NetworkTopology`** is the graph of workers. The implementation
+in `nes-distributed/include/NetworkTopology.hpp` is a directed
+acyclic graph with explicit upstream and downstream edges, plus
+DFS path-finding:
+
+```cpp
+// nes-distributed/include/NetworkTopology.hpp (sketch)
+class NetworkTopology {
+    void addNode(NodeId id, std::vector<NodeId> downstreamNodes);
+    void removeNode(NodeId id);
+    std::vector<std::vector<NodeId>> findPaths(NodeId src, NodeId dest,
+                                                Direction dir) const;
+};
+```
+
+`addNode` performs cycle detection and throws `InvalidTopology`
+(exception code 2301; see @sec-distributed-exceptions) if adding
+a node would create a cycle. The DAG constraint matters because
+the placer's connectivity check assumes acyclicity.
+
+**`WorkerCatalog`** holds the registry of workers and owns the
+topology:
+
+```cpp
+// nes-distributed/include/WorkerCatalog.hpp (sketch)
+class WorkerCatalog {
+    std::unordered_map<Host, WorkerConfig> workersByHost;
+    NetworkTopology topology;
+    uint64_t version;
+public:
+    void addWorker(Host host, WorkerConfig config);
+    const WorkerConfig& getWorker(const Host& host) const;
+    NetworkTopology getTopology() const;  // returns a snapshot
+};
+```
+
+The version counter is how clients detect catalog changes
+(workers joining or leaving) without consulting the catalog
+itself for every operation.
+
+**`WorkerConfig`** is per-worker configuration. Its most
+distinctive feature is **dual addressing**:
+
+```cpp
+// nes-distributed/include/WorkerConfig.hpp (sketch)
+struct WorkerConfig {
+    Host management;    // gRPC management endpoint (port 8080)
+    Host dataAddress;   // Data-plane endpoint (network channels)
+    std::variant<CapacityKind::Unlimited, CapacityKind::Limited> capacity;
+    std::vector<Host> downstream;
+    SingleNodeWorkerConfiguration workerConfig;
+};
+```
+
+Workers have *two* addresses. The coordinator uses
+`management` for gRPC control-plane traffic — registering a
+query, polling status, asking for shutdown. Worker-to-worker
+data flow uses `dataAddress`. Forgetting which is which is one
+of the most common bugs the placer guards against; we will see
+why in @sec-decomposition.
+
+::: {.callout-note title="Example 19.1: a five-worker topology"}
+A small fog-style deployment:
+
+```
+   cloud (192.168.1.10)
+   ↑      ↑
+   │      │
+gw-east  gw-west       (gateways)
+ ↑   ↑    ↑   ↑
+ │   │    │   │
+ sensor-1 sensor-2 sensor-3 sensor-4
+```
+
+The catalog has five workers. The topology has nine edges. A
+query reading from sensor-1, filtering, and sinking to cloud
+has multiple valid placements: the filter can run on sensor-1,
+on gw-east, or on cloud. The placer picks one. The next section
+shows how.
+:::
+
+---
+
+## 19.2 Operator placement: an integer linear program {#sec-placement-ilp}
+
+Placing operators across workers is the central decision in
+distributed query execution. Get it right and you minimise
+network traffic, exploit locality, respect hardware affinities.
+Get it wrong and a join over a hundred-megabyte stream gets
+shipped across a slow WAN link unnecessarily.
+
+NebulaStream's placer is in
+`nes-query-optimizer/include/Placement/BottomUpPlacement.hpp`
+and its implementation. The class name is misleading: despite
+"BottomUp", the algorithm is not greedy bottom-up traversal. It
+is an **integer linear program** solved by **HiGHS**
+[@highs-solver], a state-of-the-art open-source MIP solver.
+
+The ILP formulation:
+
+- **Variables.** One binary variable per (operator, node) pair.
+  A query with twelve operators and a five-node topology has
+  sixty variables.
+- **Constraints.**
+  1. Each operator is assigned to exactly one node.
+  2. Per-node capacity is respected. The demand of each
+     operator is 1 for compute operators (filter, join,
+     aggregate) and 0 for sources and sinks. Capacity is
+     either `Unlimited` or a positive integer.
+  3. Sources and sinks are *fixed* to their declared host;
+     the placer cannot move them.
+  4. Connectivity: for every parent-child operator pair, the
+     placement must admit a topology path between the parent's
+     node and the child's node.
+- **Objective.** Minimise the total *hop distance* from each
+  operator to its source descendants. Operators "want" to be
+  close to data.
+- **Solver settings.** 5-second timeout; accept solutions
+  within 1% of optimal.
+
+The variable-creation pass is short and direct:
+
+```cpp
+// nes-query-optimizer/src/Placement/BottomUpPlacement.cpp (sketch)
+for (const LogicalOperator& op : BFSRange(plan.getRootOperators().front())) {
+    for (const auto& [node, _] : topology) {
+        auto index = static_cast<int>(model.reverseIndex.size());
+        model.operatorPlacementMatrix[{op.getId(), node}] = index;
+        checkError(Highs_addCol(model.highs, index, 0, 1, 0, nullptr, nullptr),
+                   model.highs);
+        checkError(Highs_changeColIntegrality(model.highs, index,
+                                              kHighsVarTypeInteger),
+                   model.highs);
+        model.reverseIndex.emplace_back(op.getId(), node);
+    }
+}
+```
+
+The result, after solving, is a map from `OperatorId` to `Host`.
+The placer attaches a `PlacementTrait` to each operator with
+that host:
+
+```cpp
+// nes-query-optimizer/include/Traits/PlacementTrait.hpp (sketch)
+class PlacementTrait : public Trait {
+    Host onNode;
+public:
+    explicit PlacementTrait(Host onNode);
+    Host getNode() const;
+};
+```
+
+Like every trait in NebulaStream's logical algebra (Chapter 6),
+`PlacementTrait` is immutable; the operator carries it through
+every subsequent phase.
+
+::: {.callout-note title="Example 19.2: the sixty-variable problem"}
+For our Example 19.1 topology and a query
+
+```
+SELECT temp FROM sensor-1 WHERE temp > 100 INTO cloud-sink
+```
+
+(four operators: source, selection, projection, sink), the ILP
+has 4 × 5 = 20 binary variables, 4 "exactly-one-node"
+constraints, 5 capacity constraints, 2 fixed-placement
+constraints (source → sensor-1, sink → cloud), and 3 connectivity
+constraints (one per operator-pair edge). The objective is the
+sum of hop distances from each operator to sensor-1.
+
+The optimal placement: source on sensor-1, selection on
+sensor-1 (zero hops, exploits locality), projection on
+gateway-east (one hop, then aggregating before the long climb
+to cloud), sink on cloud. Total objective: small. The query
+filters at the edge before crossing the slow link to the
+cloud, which is exactly what "in-network processing" in the
+README's vision means.
+:::
+
+---
+
+## 19.3 From placed plan to network channels {#sec-decomposition}
+
+A logical plan with `PlacementTrait`s is not yet executable. The
+`QueryDecomposer`
+(`nes-query-optimizer/include/Placement/QueryDecomposition.hpp`)
+walks the placed plan, groups operators by node, and *inserts
+network channels* wherever a parent-child edge crosses a node
+boundary.
+
+The substitution is local. A logical edge `OpA → OpB` where
+`OpA.placement == nodeX` and `OpB.placement == nodeY` becomes:
+
+```
+nodeX:  OpA → NetworkSink(channelId, bind=X.dataAddress, dest=Y.dataAddress)
+nodeY:  NetworkSource(channelId, bind=Y.dataAddress) → OpB
+```
+
+The two new operators share a fresh `ChannelId` (a UUID) so the
+runtime can correlate sender and receiver. Both consult the
+worker catalog's `WorkerConfig` to find the *data-plane*
+addresses (not the gRPC management address — the dual-addressing
+distinction from @sec-distributed-types matters here).
+
+The result of decomposition is a `DistributedLogicalPlan`: one
+local plan per worker, each starting at a source or
+NetworkSource and ending at a sink or NetworkSink. From here
+each local plan goes through the ordinary single-node compile
+pipeline (Chapter 9-12), producing a per-worker
+`CompiledQueryPlan`. The coordinator ships each compiled plan
+to its worker over gRPC.
+
+::: {.callout-tip title="Real-system reference: how Flink does this"}
+Apache Flink's analogous step is its `JobGraph` → `ExecutionGraph`
+transition. Flink also inserts shuffle/forward edges that map to
+network exchanges. The differences:
+
+1. Flink's placer is heuristic; NebulaStream's is exact (ILP).
+2. Flink models per-operator parallelism explicitly (an
+   operator may run on N parallel instances). NebulaStream's
+   placer produces one operator instance per node by default;
+   intra-node parallelism is handled at the runtime level
+   (Chapter 15).
+
+The exact-vs-heuristic trade-off is interesting. Flink scales
+to thousands of operators per query partly because it does not
+solve a global optimisation problem at placement time.
+NebulaStream's HiGHS solver is fast on small queries, but its
+5-second timeout is a hint that the team has not yet stressed
+it against very large topologies.
+:::
+
+---
+
+## 19.4 The data plane: Rust channels and an in-memory fast path {#sec-data-plane}
+
+Tuples cross workers via the `nes-network/` module. The data
+plane is implemented in Rust and exposed to C++ through FFI
+bindings. There are two channel implementations:
+
+**`TcpCommunication`** for genuine inter-worker traffic. Tokio
+sockets, configurable I/O thread count, conventional TCP
+flow control.
+
+**`MemCom`** for workers co-located in the same process — useful
+for tests and for a future deployment mode that pins multiple
+workers to one machine. MemCom uses tokio's in-memory
+`SimplexStream` with 1 MiB buffers and zero serialisation:
+
+```rust
+// nes-network/network/src/memcom.rs (sketch)
+pub struct MemCom {
+    listeners: RwLock<HashMap<ConnectionIdentifier, Sender<Channel>>>,
+}
+
+impl MemCom {
+    pub fn bind(&self, id: ConnectionIdentifier) -> Receiver<Channel> {
+        let (tx, rx) = channel();
+        self.listeners.write().unwrap().insert(id, tx);
+        rx
+    }
+
+    pub fn connect(&self, id: ConnectionIdentifier) -> Result<Channel> {
+        // Retry with exponential backoff: 2ms, 4ms, ... up to 32ms,
+        // 10 retries total before giving up.
+        for delay_ms in [2u64, 4, 8, 16, 32, 32, 32, 32, 32, 32] {
+            if let Some(tx) = self.listeners.read().unwrap().get(&id).cloned() {
+                let (a_to_b, b_to_a) = simplex_pair();
+                tx.send(b_to_a)?;
+                return Ok(a_to_b);
+            }
+            std::thread::sleep(Duration::from_millis(delay_ms));
+        }
+        Err(NotConnected)
+    }
+}
+```
+
+The `SimplexStream` is half-duplex; a bidirectional channel is
+two simplex streams glued together. The Rust side uses
+`#[pinned_drop]` to ensure that abandoning one half closes the
+other — without this, blocked readers on the other end of an
+abandoned writer would hang indefinitely.
+
+**Backpressure** is configured per channel via the
+`WorkerNetworkConfiguration`:
+
+```cpp
+// nes-network/interface/WorkerNetworkConfiguration.hpp (sketch)
+struct WorkerNetworkConfiguration {
+    uint64_t senderQueueSize = 1024;     // buffers awaiting send
+    uint64_t maxPendingAcks = 64;        // in-flight unacked
+    uint64_t receiverQueueSize = 10;     // receiver-side buffer
+    uint64_t backpressureUpperThreshold;
+    uint64_t backpressureLowerThreshold;
+    uint64_t senderIOThreads = 1;        // 0 = use core count
+    uint64_t receiverIOThreads = 1;
+};
+```
+
+The defaults are conservative; production deployments will
+typically tune them per-channel based on observed throughput.
+
+::: {.callout-note title="Example 19.3: a tuple's cross-worker journey"}
+A 8-KiB `TupleBuffer` produced on worker A and consumed on
+worker B:
+
+1. Operator emits buffer; the `NetworkSink` enqueues it onto
+   the channel's `senderQueue` (max 1024 buffers).
+2. The Rust `Channel::send` half writes the buffer's bytes
+   onto the TCP socket (or the in-memory simplex stream for
+   MemCom).
+3. On worker B, the Rust receiver reads the bytes into a
+   reconstructed `TupleBuffer` allocated from worker B's local
+   buffer pool.
+4. The `NetworkSource` returns the buffer; the next
+   operator's `execute` is called.
+
+Watermarks (Chapter 7) ride along in the buffer's metadata:
+the receiving side's `MultiOriginWatermarkProcessor` consumes
+the same `OriginId`/`SequenceNumber`/`Watermark` triple that
+the sending side emitted, and the engine's notion of progress
+is consistent across the boundary.
+:::
+
+---
+
+## 19.5 The coordinator and the status hierarchy {#sec-coordinator-status}
+
+Above the workers sits the **coordinator**, which is being
+integrated on the `ys-coordinator-integration` branch and uses a
+Rust implementation with a C++/FFI bridge. Within `main`, the
+relevant runtime data structure is `DistributedQuery`, plus its
+status snapshot machinery.
+
+A distributed query's "current status" is a function of every
+worker's local query status. NebulaStream defines six states:
+
+| State | Meaning |
+|---|---|
+| Registered | All workers have accepted the query but none have started |
+| Running | At least one worker is executing |
+| PartiallyStopped | Some workers have stopped; others still running |
+| Stopped | All workers report stopped |
+| Failed | At least one worker has reported a hard failure |
+| Unreachable | At least one worker is unreachable (gRPC error) |
+
+The aggregation is in
+`nes-distributed/src/DistributedQuery.cpp` and follows a strict
+precedence order:
+
+```cpp
+// nes-distributed/src/DistributedQuery.cpp (sketch)
+DistributedQueryStatus DistributedQueryStatusSnapshot::getGlobalQueryStatus() const {
+    if (any({QueryStatus::Failed})) {
+        return DistributedQueryStatus::Failed;
+    }
+    if (hasConnectionException) {
+        return DistributedQueryStatus::Unreachable;
+    }
+    if (all({QueryStatus::Stopped})) {
+        return DistributedQueryStatus::Stopped;
+    }
+    // ... Running / PartiallyStopped / Registered ...
+}
+```
+
+`Failed` dominates `Unreachable`: a hard failure on a reachable
+worker is more authoritative than the silence of an unreachable
+one. `Unreachable` dominates `Stopped`: if any worker is
+silent, we cannot claim the whole query is stopped. This is
+exactly the precedence you want for an operator triaging a
+broken deployment.
+
+Per-query metrics (start time, last activity, stop time) are
+coalesced across workers: start = `min` (the earliest worker to
+start), running = `max` (the latest activity), stop = `max`
+(the last worker to stop).
+
+---
+
+## 19.6 What landed and what is still in flux {#sec-landed-vs-flux}
+
+A reader who has gotten this far deserves a short audit of which
+parts of the distribution story can be trusted today and which
+are work in progress.
+
+**Landed and stable on `origin/main`:**
+
+- `DistributedLogicalPlan`, `DistributedQuery`, `NetworkTopology`,
+  `WorkerCatalog`, `WorkerConfig`.
+- HiGHS-based ILP placement.
+- Decomposition with NetworkSink/NetworkSource insertion.
+- Rust TCP channel and MemCom in-memory fast path.
+- Status aggregation with Failed > Unreachable > Stopped > … precedence.
+- Distributed exception types (PlacementFailure 2300,
+  InvalidTopology 2301, UnknownWorker 2302, DistributedFailure
+  2303 — see @sec-distributed-exceptions).
+
+**Landed but tuning is open:**
+
+- Cost-model weights for the ILP. The hop-distance objective
+  gets the right shape; calibrating it for hardware-affinity
+  awareness (a GPU operator wants a GPU node) is in progress.
+- Backpressure thresholds. The defaults are reasonable; per-
+  workload tuning is pending.
+
+**Still in flight:**
+
+- The Rust coordinator integration on the
+  `ys-coordinator-integration` branch.
+- Failure recovery (a worker crash today fails the query;
+  Chapter 22 discusses this open problem).
+- Adaptive re-placement when topology changes mid-query.
+
+Where the earlier chapters of this book make claims about
+distributed behaviour, those claims are anchored on this
+chapter's verified content. Chapter 7's discussion of
+watermark propagation is the principal cross-reference: the
+four-tuple progress identifiers we met there are exactly what
+the receiving side of a `NetworkSource` consumes, and the
+`MultiOriginWatermarkProcessor` is what synthesises them into a
+unified progress view across origins from different workers.
+
+---
+
+## 19.7 The exception taxonomy for distribution {#sec-distributed-exceptions}
+
+The distributed layer has a dedicated 23XX block in
+`nes-common/include/ExceptionDefinitions.inc`:
+
+| Code | Name | Trigger |
+|---|---|---|
+| 2300 | `PlacementFailure` | ILP solver returned no feasible solution |
+| 2301 | `InvalidTopology` | adding the proposed edge would create a cycle |
+| 2302 | `UnknownWorker` | catalog lookup for a host that was never registered |
+| 2303 | `DistributedFailure` | catch-all for worker-side errors that propagate to the coordinator |
+
+The 5XXX network range (which Chapter 17 catalogues fully) does
+NOT have separate distributed-specific entries; network
+disruptions are reported as the same connection errors a
+single-node gRPC client would see, with the
+`hasConnectionException` flag in
+`DistributedQueryStatusSnapshot` carrying the distributed
+semantics.
+
+---
+
+## Summary {#sec-ch19-summary}
+
+NebulaStream's distributed layer rests on five abstractions
+(`DistributedLogicalPlan`, `DistributedQuery`, `NetworkTopology`,
+`WorkerCatalog`, `WorkerConfig`), an ILP-based placer (HiGHS
+solver, hop-distance objective, 5-second timeout), a
+decomposition pass that inserts network channels at placement
+boundaries, and a Rust-implemented data plane offering both TCP
+and in-memory MemCom transports. Worker status is aggregated
+across the cluster with a precedence order that puts Failed
+above Unreachable above Stopped. The four distributed exception
+codes (2300-2303) are a thin layer over the engine's general
+error model. What remains in flight: cost-model calibration,
+the coordinator integration, failure recovery, adaptive
+re-placement.
+
+---
+
+## Reading exercises {#sec-ch19-exercises}
+
+::: {.callout-important title="Reading exercise 19.1: read the ILP construction"}
+Open `nes-query-optimizer/src/Placement/BottomUpPlacement.cpp`
+on `origin/main`. Identify:
+
+1. The variable construction loop (one binary var per
+   operator-node pair).
+2. The capacity constraint.
+3. The connectivity constraint.
+4. The objective function.
+
+Sketch on paper the ILP that would be produced for the query
+and topology in Example 19.2. How many variables, how many
+constraints?
+:::
+
+::: {.callout-important title="Reading exercise 19.2: trace MemCom"}
+Read `nes-network/network/src/memcom.rs`. The connect path
+retries with exponential backoff. What is the maximum total
+backoff before giving up? Why does the bind path use a Tokio
+`channel::Sender<Channel>` rather than a vector?
+:::
+
+::: {.callout-important title="Reading exercise 19.3: status precedence"}
+Construct (on paper) every combination of three workers
+reporting status. For each combination, predict
+`getGlobalQueryStatus()`'s output. Verify against
+`nes-distributed/src/DistributedQuery.cpp`. The precedence
+ordering should be unambiguous; if you find an ambiguous case,
+that is a bug worth reporting.
+:::
+
+::: {.callout-important title="Reading exercise 19.4: a fault-injection thought experiment"}
+Pick a worker in your hypothetical 5-worker topology. Imagine
+it crashes mid-query. Walk through what the engine actually
+does today: the coordinator's poll fails, the
+`hasConnectionException` flag flips, the global status becomes
+`Unreachable`. What does *not* happen automatically: state
+recovery, re-placement, query restart. Map each "does not
+happen" item to the open-problem item in @sec-distributed-future.
+:::
+
+---
+
+## References {#sec-ch19-refs}
+
+- *NebulaStream `nes-distributed/`.*
+  `nes-distributed/include/` and `src/`. The five core types live here.
+- *NebulaStream `nes-network/`.*
+  `nes-network/network/src/channel.rs` (TCP),
+  `nes-network/network/src/memcom.rs` (in-memory),
+  `nes-network/interface/` (C++ configuration headers).
+- *Placement code.*
+  `nes-query-optimizer/include/Placement/`,
+  `nes-query-optimizer/src/Placement/BottomUpPlacement.cpp`.
+- *HiGHS solver.* Q. Huangfu, J. A. J. Hall, *Parallelizing the
+  dual revised simplex method*, Math. Prog. Comp., 2018.
+  See [@highs-solver].
+- *In-network processing.* M. Fjellanger et al., *Querying the
+  Edge: Pushing SQL Operators into the Data Plane.* SIGMOD 2023.
+- *MillWheel.* Akidau et al., VLDB 2013 [@millwheel-akidau] —
+  the canonical predecessor for cloud-scale stream processing
+  with cluster-aware progress tracking.
+- *Apache Flink.* P. Carbone et al., IEEE Data Eng. Bull., 2015.
+- *Tokio.* C. Lerche et al. *Tokio: Asynchronous runtime for
+  the Rust programming language.* `https://tokio.rs`.
+- *MemCom design (in-tree).* The protocol is documented in
+  `nes-network/network/src/memcom.rs`'s module-level Rust doc;
+  read it directly rather than rely on this chapter's summary.

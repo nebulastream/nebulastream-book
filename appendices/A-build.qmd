@@ -1,0 +1,189 @@
+# Building NebulaStream {#sec-app-build .unnumbered}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+This appendix walks through three supported ways to build
+NebulaStream from source: the Nix flake, the Docker development
+container, and a local build with vcpkg. The official source of
+truth is the README; this appendix summarises the steps in book
+form for the reader who wants to build the engine while reading.
+
+The toolchain requirements are stringent: **Clang 19** is the only
+supported compiler. This is documented in CLAUDE.md; the Nix and
+Docker paths take care of installing the right toolchain
+automatically.
+
+---
+
+## A.1 The Nix flake {#sec-app-nix}
+
+If you have Nix installed with flakes enabled, this is the path
+of least friction:
+
+```shell
+# One-time IDE setup (also creates the cmake-build-debug directory)
+nix run .#clion-setup
+
+# Configure the build
+./.nix/nix-cmake.sh \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -G Ninja \
+    -S . -B cmake-build-debug
+
+# Build everything
+./.nix/nix-cmake.sh --build cmake-build-debug
+
+# Run tests
+./.nix/ctest --test-dir cmake-build-debug -j
+```
+
+The Nix flake (`flake.nix` at the repo root) pins every
+dependency: LLVM 19, Folly, ANTLR4, simdjson, fmt, spdlog, and so
+on. Builds are reproducible across machines.
+
+For formatting and clang-tidy fixes:
+
+```shell
+nix run .#format
+nix run .#clang-tidy
+```
+
+---
+
+## A.2 The Docker dev image {#sec-app-docker}
+
+If Nix is not available, the Docker development image is the next
+best option. It uses the same toolchain pinned the same way:
+
+```shell
+# Build (or pull) the local development image
+./scripts/install-local-docker-environment.sh
+
+# Configure
+docker run \
+    --workdir $(pwd) \
+    -v $(pwd):$(pwd) \
+    nebulastream/nes-development:local \
+    cmake -B cmake-build-debug
+
+# Build
+docker run \
+    --workdir $(pwd) \
+    -v $(pwd):$(pwd) \
+    nebulastream/nes-development:local \
+    cmake --build cmake-build-debug -j
+
+# Test
+docker run \
+    --workdir $(pwd) \
+    -v $(pwd):$(pwd) \
+    nebulastream/nes-development:local \
+    ctest --test-dir cmake-build-debug -j
+```
+
+The verbose `docker run` invocation can be aliased to a single
+command in your shell config; the README has notes on doing so.
+
+---
+
+## A.3 Local build with vcpkg {#sec-app-vcpkg}
+
+For a local build with neither Nix nor Docker, vcpkg manages
+dependencies. The manifest is at `vcpkg/vcpkg.json`. You will
+need:
+
+- Clang 19.
+- Ninja or another CMake generator.
+- vcpkg installed and bootstrapped.
+
+```shell
+# Configure
+cmake -DCMAKE_BUILD_TYPE=Debug -G Ninja -S . -B cmake-build-debug
+
+# Build
+cmake --build cmake-build-debug -j
+```
+
+vcpkg will populate dependencies on first configure; subsequent
+configures are fast.
+
+---
+
+## A.4 Build types and what they enable {#sec-app-build-types}
+
+NebulaStream supports four build types, distinguished primarily
+by logging and assertion behaviour:
+
+| Build type | Logging | Asserts | Optimisation |
+|---|---|---|---|
+| `Debug` | TRACE | enabled | none (`-O0`) |
+| `RelWithDebInfo` | WARN | enabled | with debug info (`-O2 -g`) |
+| `Release` | ERROR | enabled | full (`-O3`) |
+| `Benchmark` | none | disabled | full + native (`-O3 -march=native`) |
+
+Pick `Debug` when you are actively developing — TRACE-level
+logging is usually what you want when something is wrong.
+Pick `RelWithDebInfo` for performance work that still needs
+asserts. Pick `Release` for production. Pick `Benchmark` only
+for performance experiments where you understand exactly what
+you are measuring.
+
+The `cmake-build-instrumentation` directory referenced in
+Chapter 21 is a separate build type for performance instrumentation
+work; the team's CMake helpers handle it through the build type
+mechanism.
+
+---
+
+## A.5 Common targets {#sec-app-targets}
+
+A few build targets you will use repeatedly:
+
+```shell
+# Build everything
+cmake --build cmake-build-debug -j
+
+# Build a single module
+cmake --build cmake-build-debug -j --target nes-query-optimizer
+
+# Build the systest binary
+cmake --build cmake-build-debug --target systest
+
+# Build the worker process
+cmake --build cmake-build-debug -j --target nes-single-node-worker
+
+# Build the REPL and CLI
+cmake --build cmake-build-debug -j --target nes-repl nebuli
+
+# Format the entire codebase
+cmake --build cmake-build-debug --target format
+
+# Check format without modifying
+cmake --build cmake-build-debug --target check-format
+```
+
+The `format` and `check-format` targets are required to pass
+before any PR can merge.
+
+---
+
+## A.6 Running tests after building {#sec-app-tests}
+
+Cross-reference Chapter 20.
+
+```shell
+# All tests
+ctest --test-dir cmake-build-debug -j --output-on-failure
+
+# Tests matching a regex
+ctest --test-dir cmake-build-debug -R "DecideJoinTypesTest" --output-on-failure
+
+# Single systest
+cmake-build-debug/systest/systest -t nes-systests/operator/join/JoinMultipleStreams.test
+
+# Single systest in interpreter mode
+cmake-build-debug/systest/systest \
+    -t nes-systests/operator/join/JoinMultipleStreams.test:1 \
+    -- --worker.default_query_execution.execution_mode=INTERPRETER
+```

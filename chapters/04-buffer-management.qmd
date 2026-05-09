@@ -1,0 +1,261 @@
+# Buffer Management and Memory Layout {#sec-buffer-management}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+The previous chapter introduced the `TupleBuffer` as the unit of
+inter-operator data flow. This chapter is about where those buffers
+come from, where they go, and how they are laid out in memory.
+
+The story is short. NebulaStream uses a pool: a pre-allocated array
+of fixed-size buffers, recycled with reference counting. Memory
+layout is a property of each buffer, decided once during
+optimisation. There is no virtual memory subsystem, no swapping, no
+buffer-pool replacement policy more sophisticated than "give me a
+buffer, I'll give it back."
+
+The design is austere. The reasons it works are interesting.
+
+---
+
+## 4.1 The pool: pre-allocated, fixed-size, recycled {#sec-pool}
+
+The buffer manager lives in `nes-memory/include/Runtime/BufferManager.hpp`.
+The defaults reveal the design:
+
+```cpp
+// nes-memory/include/Runtime/BufferManager.hpp
+class BufferManager final
+    : public std::enable_shared_from_this<BufferManager>,
+      public BufferRecycler,
+      public AbstractBufferProvider {
+    static constexpr auto DEFAULT_BUFFER_SIZE = 8 * 1024;
+    static constexpr auto DEFAULT_NUMBER_OF_BUFFERS = 1024;
+    static constexpr auto DEFAULT_ALIGNMENT = 64;
+public:
+    static std::shared_ptr<BufferManager> create(
+        uint32_t bufferSize = DEFAULT_BUFFER_SIZE,
+        uint32_t numOfBuffers = DEFAULT_NUMBER_OF_BUFFERS,
+        const std::shared_ptr<std::pmr::memory_resource>& memoryResource
+            = std::make_shared<NesDefaultMemoryAllocator>(),
+        uint32_t withAlignment = DEFAULT_ALIGNMENT);
+};
+```
+
+The default configuration: 1024 buffers of 8 KiB each, 64-byte
+aligned. That is 8 MiB of buffer memory, allocated up front, on
+worker startup, and not released until shutdown. Buffers are
+returned to the pool when their reference count drops to zero, not
+freed individually.
+
+Three things in this design deserve a closer look.
+
+**Pre-allocation.** Allocating 8 MiB on startup costs one `mmap` and
+one zero-fill. Once the engine is warm, no buffer-related allocation
+occurs on the hot path. This eliminates a class of latency spikes
+that show up in interpreted-language engines, where garbage collection
+or first-touch faulting can add milliseconds to an otherwise fast
+operation. NebulaStream pays the entire memory bill at startup and
+gets predictable steady-state behaviour in exchange.
+
+**Fixed buffer size.** Every buffer is 8 KiB. There is no buffer
+class hierarchy with small buffers and big buffers. Variable-size
+data — strings, blobs — that does not fit alongside fixed-width
+columns goes into a *child buffer*, also from the pool, also 8 KiB,
+linked into the parent's lifetime. This means a few common cases
+waste memory: a `VARSIZED` field of 100 bytes still takes a full 8
+KiB child. The trade-off is operational simplicity: the pool has
+exactly one slot size, the recycler has exactly one path, and the
+allocator never has to consult a free-list of differently-sized
+chunks.
+
+**64-byte alignment.** Modern x86_64 CPU lines are 64 bytes. Aligning
+the buffers to a cache-line boundary makes the JIT's vectorised
+code much happier; misaligned loads/stores are not free, even on
+hardware that "supports" them. ARM is similar.
+
+::: {.callout-note title="Example 4.1: a buffer's life"}
+A worker thread needs a buffer to write the output of a projection.
+It calls `bufferManager.getBufferBlocking()`, which:
+
+1. Pops a buffer pointer from the pool's `folly::MPMCQueue`.
+2. Increments the buffer's reference count from 0 to 1.
+3. Resets the metadata (origin, sequence, etc.) to defaults.
+4. Returns a `TupleBuffer` wrapper to the caller.
+
+The worker fills the buffer, attaches it to a `WorkTask`, and
+sends it onwards. Three operators downstream, the last consumer
+of the buffer goes out of scope. The `TupleBuffer` destructor
+fires, decrements the count to 0, and returns the buffer pointer
+to the pool's queue. No `delete`, no `free`, no `mmap`.
+:::
+
+---
+
+## 4.2 What happens when the pool is empty {#sec-pool-empty}
+
+The pool can be exhausted. With 1024 buffers and a query graph of
+ten operators each holding two buffers in flight, you can support
+about 50 concurrent worker threads before pressure starts. In
+practice, the engine sizes the pool to the workload; the default of
+1024 is a starting point, not a target.
+
+When the pool is empty, `getBufferBlocking` does what its name
+says: it blocks. A worker thread waiting for a buffer is, in effect,
+backpressured. This is the engine's third backpressure mechanism, in
+addition to the source-side admission queue (Chapter 15) and the
+slow-sink-throttles-source pattern that emerges from the worker
+thread pool. All three feed into the same end-to-end behaviour: a
+slow consumer slows down a fast producer.
+
+The non-blocking variant `getUnpooledBuffer` exists for
+emergencies — it allocates a fresh buffer outside the pool — but
+its use is rare and discouraged. The intent is that the pool is the
+only path.
+
+---
+
+## 4.3 Memory layout: row vs. columnar {#sec-memory-layout}
+
+A schema and a buffer size do not determine where the bytes go. A
+buffer of 1024 tuples each consisting of two `UINT64` fields could
+be laid out as:
+
+- **Row layout.** `[(field1, field2), (field1, field2), …]`. All
+  fields of a tuple together; tuples adjacent.
+- **Column layout.** `[field1×1024, field2×1024]`. All values of one
+  field together; fields separate.
+
+Column layouts are usually faster for scans that touch a subset of
+fields (the famous OLAP advantage). Row layouts are usually faster
+for operations that touch every field of a tuple at once (the OLTP
+advantage). Streaming workloads land between: aggregations love
+columnar; per-tuple projections that touch most fields prefer row.
+
+NebulaStream's optimiser has a phase called `DecideMemoryLayoutRule`,
+in `nes-query-optimizer/include/Rules/Static/DecideMemoryLayoutRule.hpp`.
+The phase is small:
+
+```cpp
+// nes-query-optimizer/include/Rules/Static/DecideMemoryLayoutRule.hpp
+// For now, we use row-layout across all operators.
+class DecideMemoryLayoutRule {
+public:
+    LogicalPlan apply(LogicalPlan plan) const;
+};
+```
+
+The current implementation picks row layout for every plan. The
+phase exists, the infrastructure for columnar layouts is in place,
+the JIT-level support for both layouts is there — but the optimiser
+unconditionally chooses row.
+
+::: {.callout-warning title="Caveat: columnar is a future direction"}
+The decision to default to row layout is documented in the
+optimiser as deliberate. Columnar support is partly implemented in
+`nes-nautilus/` (the Record interface supports both), and a future
+optimiser pass will make a per-operator choice. As of the pinned
+commit, however, "memory layout" is a single decision applied
+uniformly. Treat the framework as ready for an upgrade rather than
+the upgrade itself.
+:::
+
+---
+
+## 4.4 The MemoryProvider abstraction {#sec-memory-provider}
+
+A buffer + a layout + a schema is enough information to read and
+write tuples. NebulaStream wraps these in a `MemoryProvider`
+interface that the JIT code uses to access fields. The
+`MemoryProvider` knows the layout and produces, for each field
+access, the correct pointer arithmetic. It is the indirection that
+makes "row vs. columnar" a per-buffer choice rather than a global
+choice.
+
+In code-generated terms: when the JIT lowers a `Record::read("value")`,
+it asks the `MemoryProvider` for the address calculation. For a row
+layout, the address is `base + tupleIndex * tupleSize +
+fieldOffset`. For a columnar layout, it is `base + fieldOffset *
+numTuples + tupleIndex * fieldWidth`. Both layouts produce code
+that is nearly as fast as a hand-written loop.
+
+We will see the JIT side of this in Chapter 12.
+
+---
+
+## 4.5 The pmr escape hatch {#sec-pmr}
+
+The `BufferManager::create` signature takes a
+`std::pmr::memory_resource`. By default it is
+`NesDefaultMemoryAllocator`, which calls into the system allocator.
+The escape hatch is there because workloads on specialised hardware
+(GPUs, ARM accelerators, persistent-memory devices) may want to
+allocate buffers from an arena that is not main memory. Plumbing
+that arena through the standard `pmr` interface keeps the rest of
+the engine unchanged.
+
+This is one of the seams where NebulaStream's "heterogeneous
+hardware" vision shows up in code: a future GPU backend would
+provide a `pmr::memory_resource` that allocates from device
+memory, and the buffer manager would be unchanged.
+
+---
+
+## Summary {#sec-ch4-summary}
+
+NebulaStream's buffer manager is a pre-allocated pool of fixed-size
+(default 8 KiB), 64-byte-aligned, reference-counted buffers
+distributed via a folly MPMC queue. The design is austere — no
+size classes, no variable allocations on the hot path, no swap —
+because the simplification pays for the underlying assumption that
+the workload fits in main memory. Memory layout (row vs. columnar)
+is decided per-buffer by an optimiser phase that currently hardcodes
+row, with the columnar support stubbed in for future work. The
+`pmr::memory_resource` extension point allows future hardware
+backends to provide alternative allocators without touching the
+rest of the engine.
+
+---
+
+## Reading exercises {#sec-ch4-exercises}
+
+::: {.callout-important title="Reading exercise 4.1: pool exhaustion"}
+Reduce `DEFAULT_NUMBER_OF_BUFFERS` from 1024 to 8 in a local copy
+of `BufferManager.hpp` and rebuild. Run a join systest:
+
+```shell
+cmake-build-debug/systest/systest \
+    -t nes-systests/operator/join/JoinMultipleStreams.test:1
+```
+
+Does the test still pass? How does throughput change? Where does
+the engine spend time when buffers are scarce?
+:::
+
+::: {.callout-important title="Reading exercise 4.2: confirm the layout"}
+Insert an `NES_DEBUG` log inside `DecideMemoryLayoutRule::apply`
+that prints the layout chosen for each operator. Run any systest
+in INTERPRETER mode. Confirm — for now — that every operator gets
+row layout.
+:::
+
+::: {.callout-important title="Reading exercise 4.3: variable-size payloads"}
+Run a systest that uses `VARSIZED` fields, e.g.,
+`nes-systests/operator/join/JoinWithVarSized.test`. Trace one
+buffer through the engine. How are child buffers attached? When
+does a parent's destructor release a child?
+:::
+
+---
+
+## References {#sec-ch4-refs}
+
+- *BufferManager.* `nes-memory/include/Runtime/BufferManager.hpp`.
+- *DecideMemoryLayoutRule.*
+  `nes-query-optimizer/include/Rules/Static/DecideMemoryLayoutRule.hpp`.
+- *MonetDB / X100.* P. Boncz, M. Zukowski, N. Nes, *MonetDB/X100:
+  Hyper-Pipelining Query Execution.* CIDR 2005. The canonical
+  argument for columnar memory layout in main-memory engines.
+- *Flink MemorySegment.* F. Hueske, V. Kalavri, *Stream Processing
+  with Apache Flink.* O'Reilly, 2019.
+- *Polymorphic memory resources.* ISO/IEC 14882:2017, `<memory_resource>`.

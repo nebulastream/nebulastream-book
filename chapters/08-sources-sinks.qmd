@@ -1,0 +1,333 @@
+# Sources, Sinks, and Input Formatters {#sec-sources-sinks}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+A stream processing engine without sources is just an interpreter for
+a query language. NebulaStream's source and sink subsystem is what
+makes the engine plug into the world — into files, into TCP streams,
+into Kafka, into whatever the data is actually flowing through.
+
+The subsystem has four moving parts: **sources** (where bytes come
+from), **sinks** (where bytes go to), **input formatters** (how bytes
+become tuples) and **output formatters** (how tuples become bytes).
+Each is plugin-extensible through a static registry; the engine
+shipping today supports a handful of formats out of the box and a
+handful more as optional plugins.
+
+This chapter walks through all four parts, with attention to two
+non-obvious design choices: the strict separation between source and
+formatter, and the *fully-specified descriptor* model that lets
+workers run sources without coordinator round-trips.
+
+---
+
+## 8.1 The source contract {#sec-source-contract}
+
+A source's job is to fill a `TupleBuffer` with raw bytes. The
+contract is in `nes-sources/include/Sources/Source.hpp`:
+
+```cpp
+// nes-sources/include/Sources/Source.hpp
+class Source {
+public:
+    class FillTupleBufferResult {
+        struct EoS {};
+        struct Data { size_t sizeInBytes; };
+        std::variant<EoS, Data> result = EoS{};
+    public:
+        static FillTupleBufferResult eos() { return {}; }
+        static FillTupleBufferResult withBytes(size_t sizeInBytes)
+            { return FillTupleBufferResult{sizeInBytes}; }
+        [[nodiscard]] bool isEoS() const { return std::holds_alternative<EoS>(result); }
+        [[nodiscard]] size_t getNumberOfBytes() const
+            { return std::get<Data>(result).sizeInBytes; }
+    };
+    virtual FillTupleBufferResult fillTupleBuffer(TupleBuffer buffer) = 0;
+};
+```
+
+One method: `fillTupleBuffer`. The buffer is given to the source
+empty; the source writes raw bytes into it and returns either
+"end of stream" or "I wrote N bytes." That is it.
+
+What this contract does *not* do: the source does not parse the
+bytes. A CSV source produces a buffer full of newline-separated
+ASCII; a JSON source produces a buffer full of brace-bracketed JSON
+text. Neither knows what the schema is. Parsing happens later.
+
+The reason for this separation is throughput. Reading from a TCP
+socket and parsing CSV are different work; doing them in different
+threads (or, more importantly, on different cores) lets each one
+saturate its bottleneck independently. The source thread's
+bottleneck is I/O; the formatter thread's bottleneck is CPU. They
+should not block each other.
+
+---
+
+## 8.2 The descriptor model {#sec-descriptors}
+
+Every source has two artefacts in the engine:
+
+- A **`SourceDescriptor`**, declared up front by the user and
+  resolved by the binder. It is just configuration: type name (e.g.,
+  "TCP", "File"), key-value config map, schema.
+
+- A **`Source` implementation**, instantiated at query startup from
+  the descriptor by looking up the type name in the source registry.
+
+The descriptor contains everything the engine needs to construct
+the source. Critically, this design makes workers stateless with
+respect to source configuration: a worker receives the descriptor
+embedded in the `CompiledQueryPlan` and constructs its own source
+instance, with no need to consult the coordinator at runtime.
+
+::: {.callout-note title="Example 8.1: descriptor for a TCP source"}
+
+```
+SourceDescriptor {
+    type = "TCP"
+    config = {
+        "HOST": "vehicle-1.local",
+        "PORT": "5001",
+        "TIMEOUT_MS": "5000"
+    }
+    schema = Schema { vehicles$id: UINT64, vehicles$speed: FLOAT64, ... }
+    formatter = FormatterDescriptor {
+        type = "CSV",
+        config = { "TUPLE_DELIMITER": "\n", "FIELD_DELIMITER": "," }
+    }
+}
+```
+
+Worker receives this descriptor, looks up "TCP" in
+`SourceRegistry`, constructs a `TCPSource` configured with the
+host/port/timeout, and connects. Same for the formatter.
+:::
+
+This is one of the design choices documented in the
+`docs/design/20240702_sources_and_sinks.md` design document. The
+goal stated there is "stateless worker": all per-source state lives
+in the descriptor, not on the worker. The motivation is operational:
+in a future distributed deployment, queries can be moved between
+workers without state migration; only the descriptor moves.
+
+---
+
+## 8.3 The input formatter chain {#sec-input-formatters}
+
+Bytes from a source go to an input formatter. The formatter's job
+is to read the raw bytes and produce a *formatted* `TupleBuffer`
+whose layout matches the schema.
+
+The formatter splits this into two phases:
+
+**Phase 1 — Indexing.** Walk the raw bytes, find tuple boundaries,
+locate field offsets. The output of this phase is a set of indices
+(byte offsets) into the raw buffer. No data is copied.
+
+**Phase 2 — Parsing.** Use the indices to read each field's bytes,
+convert from the source format (e.g., the ASCII string `"3.14"`)
+to the native NebulaStream format (the IEEE-754 `double` value
+`3.14`), and write into the formatted buffer.
+
+The split exists because indexing can sometimes be parallelised
+(splitting work between threads on tuple boundaries), and because
+some sources can perform indexing themselves (a Parquet file source
+already has field offsets), in which case the indexing phase is a
+no-op.
+
+The interface is in `nes-input-formatters/include/InputFormatters/InputFormatter.hpp`:
+
+```cpp
+// nes-input-formatters/include/InputFormatters/InputFormatter.hpp
+class InputFormatter {
+public:
+    virtual void parseTupleBuffer(
+        const TupleBuffer& rawBuffer,
+        TupleBuffer& formattedBuffer,
+        const Schema& schema) = 0;
+    // ... index-related methods omitted ...
+};
+```
+
+The implementations live in `nes-input-formatters/`:
+
+- **`CSVInputFormatter`** — handles the textbook case. Configurable
+  field and tuple delimiters.
+- **`JSONInputFormatter`** — uses simdjson [@simdjson] for fast
+  parsing.
+- **`NativeInputFormatter`** — an identity formatter for sources that
+  already produce native-format tuples.
+
+Adding a formatter is a registry registration plus a class
+implementing the interface. We will see the registry pattern in
+Chapter 13.
+
+---
+
+## 8.4 SequenceShredder: tuples that span buffers {#sec-shredder}
+
+A 12 KiB JSON record does not fit in an 8 KiB raw buffer. A 100-line
+CSV file followed by a partial 101st line at byte 8190 leaves the
+101st line straddling buffer boundary. The formatter has to handle
+these cases.
+
+The component that does is the `SequenceShredder`, documented
+extensively in `nes-input-formatters/README.md`. The shredder
+maintains per-source state about partial tuples and reassembles
+them when the missing pieces arrive. It is what allows the
+formatter to operate on independent buffers in parallel without
+losing tuples that cross boundaries.
+
+The shredder is the reason tuples carry `SequenceNumber` *and*
+`ChunkNumber` (Chapter 7): chunks let the shredder know that
+sequence number S has multiple physical pieces.
+
+---
+
+## 8.5 Sinks and output formatters {#sec-sinks}
+
+Sinks mirror sources in shape. The interface is in
+`nes-sinks/include/Sinks/Sink.hpp`, smaller because sinks have less
+work to do:
+
+```cpp
+// nes-sinks/include/Sinks/Sink.hpp
+class Sink {
+public:
+    virtual void start(...) = 0;
+    virtual void execute(const TupleBuffer& formatted, ...) = 0;
+    virtual void stop(...) = 0;
+};
+```
+
+Each `execute` call receives a formatted `TupleBuffer`. The sink
+hands it to its output formatter, which produces the wire-format
+bytes, then writes those bytes to the destination (file, TCP
+socket, etc.).
+
+Built-in sinks include `FileSink`, `PrintSink`, and (as an optional
+plugin) `VoidSink` (for benchmarking — discards everything). Output
+formatters mirror the input side: CSV and JSON, with a "Native"
+identity case.
+
+The asymmetry between source and sink declarations in SQL (Chapter 5
+mentioned this) is reflected here: sinks combine declaration and
+implementation in one statement because a single logical sink does
+not benefit from multiple physical implementations the way a source
+does.
+
+---
+
+## 8.6 The plugin registry {#sec-source-sink-plugins}
+
+Sources, sinks, input formatters and output formatters are all
+plugin-registered. The CMake macro `add_plugin` registers an
+internal plugin; `add_plugin_as_library` registers an optional one.
+Activating an optional plugin is a single line in
+`nes-plugins/CMakeLists.txt`:
+
+```cmake
+// nes-plugins/CMakeLists.txt
+activate_optional_plugin("Sources/TCPSource" ON)
+activate_optional_plugin("Sources/GeneratorSource" ON)
+activate_optional_plugin("Sinks/VoidSink" ON)
+activate_optional_plugin("InputFormatters/JSONInputFormatter" ON)
+activate_optional_plugin("OutputFormatters/JSONOutputFormatter" ON)
+if (NES_ENABLES_TESTS)
+    activate_optional_plugin("Sinks/ChecksumSink" ON)
+endif()
+```
+
+The plugins active by default ship a handful of common sources and
+sinks; everything else is opt-in. The full mechanism — including
+how the plugin classes register themselves at static initialisation
+time without falling into the static-initialisation-order fiasco —
+is the subject of Chapter 13.
+
+::: {.callout-tip title="Real-system reference: how Telegraf does this"}
+Telegraf, the InfluxData metrics agent, has 300+ source plugins
+("inputs" in their terminology), each compiled into the binary
+through a similar register-by-name pattern. NebulaStream's plugin
+system is small in comparison (a dozen sources today) but
+architecturally the same.
+
+The interesting technical difference is that Telegraf's plugins are
+Go interfaces with dynamic dispatch, whereas NebulaStream's are
+C++ types resolved at compile time. NebulaStream pays for static
+linking with a slower build but a faster runtime.
+:::
+
+---
+
+## Summary {#sec-ch8-summary}
+
+NebulaStream's source and sink subsystem separates I/O (sources,
+sinks) from format conversion (formatters), with each part
+plugin-extensible through a static registry. The descriptor-based
+configuration model makes workers stateless: a worker receives a
+fully-specified `SourceDescriptor` and constructs its own source
+instance with no coordinator round-trip. The `SequenceShredder`
+handles tuples that span physical buffer boundaries, allowing
+parallel parsing of independent buffers. Sinks mirror sources in
+shape but combine logical/physical declaration into a single
+statement because the multi-physical fan-in pattern that motivates
+the source split does not apply on the output side.
+
+---
+
+## Reading exercises {#sec-ch8-exercises}
+
+::: {.callout-important title="Reading exercise 8.1: build a custom CSV"}
+Construct a CSV file with a quoted field containing a newline:
+
+```
+1,"hello\nworld",42
+2,"good\nbye",99
+```
+
+Run a query reading this file. Does NebulaStream handle quoted
+multiline fields correctly? If yes, where in the
+`CSVInputFormatter` is the quoting logic? If no, what does the
+formatter do — drop, error, or split?
+:::
+
+::: {.callout-important title="Reading exercise 8.2: a TCP source"}
+Activate the TCP source plugin (it is on by default but verify
+in `nes-plugins/CMakeLists.txt`). Use `netcat` to feed lines into
+the worker:
+
+```shell
+nc -l 5001 < demo-input.csv
+```
+
+… and a query reading from it. Compare the throughput against
+the file source. Where is the bottleneck? Hint: it is almost
+certainly the TCP buffer, not the engine.
+:::
+
+::: {.callout-important title="Reading exercise 8.3: trace a multi-chunk record"}
+Create a JSON file with one record larger than the default
+TupleBuffer (8 KiB). Run a query reading it in TRACE mode. Watch
+the chunk numbers in the buffer metadata. The
+`SequenceShredder` should reassemble the record before the
+windowing/aggregation operators see it. Verify this in the log.
+:::
+
+---
+
+## References {#sec-ch8-refs}
+
+- *Source.* `nes-sources/include/Sources/Source.hpp`.
+- *Sink.* `nes-sinks/include/Sinks/Sink.hpp`.
+- *InputFormatter.*
+  `nes-input-formatters/include/InputFormatters/InputFormatter.hpp`.
+- *Sources & Sinks design document.*
+  `/Users/zeuchste/git/nebulastream/docs/design/20240702_sources_and_sinks.md`.
+- *simdjson.* G. Langdale, D. Lemire, *Parsing Gigabytes of JSON
+  per Second.* VLDB Journal, 2019.
+- *Telegraf.* InfluxData, Inc. Open-source metrics agent.
+  `https://github.com/influxdata/telegraf`.
+- *Apache Kafka source / sink.* For comparison, the analogous
+  pattern in Kafka Connect.

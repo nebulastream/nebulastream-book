@@ -1,0 +1,302 @@
+# The Query Language and Parser {#sec-query-language}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+NebulaStream speaks a SQL dialect that is close to standard SQL with
+two extensions: a way to declare logical and physical sources
+separately, and `INTO` clauses that route a query's output to a
+named sink. The parser is built on ANTLR4. The binding step turns a
+parse tree into a typed `LogicalPlan`. Both live in
+`nes-sql-parser/`.
+
+This chapter walks through the language and the parser. The
+language is not fancy, but the source/sink declaration model
+deserves a careful look — it is one of the more interesting design
+choices in the engine.
+
+---
+
+## 5.1 The four DDL/DML shapes {#sec-shapes}
+
+Every NebulaStream program is built from four kinds of statement.
+We saw all four in our demo query in Chapter 2. Let us look at each
+in isolation.
+
+**Logical source.** Declares a named stream and its schema, with no
+implementation:
+
+```sql
+CREATE LOGICAL SOURCE demo(value UINT64);
+```
+
+After this statement, `demo` is a name the rest of the program can
+refer to, but nothing is producing data yet.
+
+**Physical source.** Binds an implementation to a logical source:
+
+```sql
+CREATE PHYSICAL SOURCE FOR demo
+    TYPE File
+    SET('./demo-input.csv' AS `SOURCE`.FILE_PATH,
+        'CSV' AS PARSER.`TYPE`);
+```
+
+`TYPE` selects an implementation from the source registry. The
+`SET(…)` clause carries arbitrary key-value configuration. The
+backticks around `SOURCE` and `TYPE` are SQL-standard escaping for
+identifiers that collide with reserved words.
+
+**Sink.** Declares an output channel with a schema *and* an
+implementation:
+
+```sql
+CREATE SINK result(demo.value UINT64)
+    TYPE File
+    SET('./demo-output.csv' AS `SINK`.FILE_PATH,
+        'CSV' AS `SINK`.OUTPUT_FORMAT);
+```
+
+Note that sinks combine the logical declaration and the physical
+implementation in one statement, unlike sources. We will see why in
+@sec-source-vs-sink.
+
+**Query.** A familiar `SELECT` with one twist: the output is named:
+
+```sql
+SELECT value FROM demo INTO result;
+```
+
+`INTO result` is required; NebulaStream queries always produce a
+named output, never an anonymous result set. There is no client-
+side cursor; if you want results in `nes-repl`, you declare a
+`PrintSink` and route the query into it.
+
+---
+
+## 5.2 Why two source statements? {#sec-source-vs-sink}
+
+The split between logical and physical source declarations is the
+non-obvious part of the language. Most SQL engines combine the two:
+`CREATE TABLE foo (x INT) ENGINE=File LOCATION='/path'` or its
+moral equivalent. NebulaStream separates them. Why?
+
+The reason is that one logical source can have *multiple* physical
+sources, and the engine treats them as a single logical input. A
+fleet of 200 vehicles can each have its own physical source —
+perhaps an MQTT topic per vehicle — that all feed a single logical
+source named `vehicles`. A query that reads from `vehicles` reads
+from the union of all 200 physical sources, with the engine
+managing parallelism, watermarks, and per-physical-source state
+under the hood.
+
+::: {.callout-note title="Example 5.1: a fleet of vehicles"}
+
+```sql
+CREATE LOGICAL SOURCE vehicles(
+    id UINT64,
+    speed FLOAT64,
+    creationTS UINT64);
+
+CREATE PHYSICAL SOURCE FOR vehicles TYPE TCP
+    SET('vehicle-1.local' AS HOST, '5001' AS PORT, ...);
+CREATE PHYSICAL SOURCE FOR vehicles TYPE TCP
+    SET('vehicle-2.local' AS HOST, '5001' AS PORT, ...);
+-- ... 198 more ...
+CREATE PHYSICAL SOURCE FOR vehicles TYPE TCP
+    SET('vehicle-200.local' AS HOST, '5001' AS PORT, ...);
+
+SELECT id, speed FROM vehicles WHERE speed > 100 INTO alerts;
+```
+
+The `SELECT` is unaware of the 200-physical fan-in. The engine
+treats `vehicles` as a single logical input whose physical
+realisation happens to be 200 TCP connections. Adding or removing
+a vehicle is a `CREATE PHYSICAL SOURCE` or its inverse — no query
+edit required.
+:::
+
+Sinks do not need this split because the analogous fan-out is
+handled differently — typically by the application code that
+consumes from the sink, not by the engine. A future direction may
+introduce a logical/physical sink split if the symmetry becomes
+useful; today it does not.
+
+---
+
+## 5.3 The grammar {#sec-grammar}
+
+The grammar lives in `nes-sql-parser/AntlrSQL.g4`. Here is the
+relevant slice:
+
+```antlr
+// nes-sql-parser/AntlrSQL.g4
+createLogicalSourceDefinition:
+    LOGICAL SOURCE sourceName=identifier schemaDefinition fromQuery?;
+
+createPhysicalSourceDefinition:
+    PHYSICAL SOURCE FOR logicalSource=identifier
+    TYPE type=identifier
+    optionsClause?;
+
+createSinkDefinition:
+    SINK sinkName=identifier schemaDefinition
+    TYPE type=identifier optionsClause?;
+
+optionsClause: (SET '(' options=namedConfigExpressionSeq ')');
+```
+
+Three observations.
+
+First, the grammar is small. NebulaStream's SQL is intentionally a
+subset of standard SQL; you will not find `WITH RECURSIVE`,
+correlated subqueries, or PIVOT here. The streaming workloads the
+engine targets simply do not need them.
+
+Second, the grammar is unambiguous about `TYPE`. Both physical
+source and sink declarations have a `TYPE` clause that selects the
+implementation by name. The name must match an entry in the
+source/sink registry (Chapter 13); unknown types produce a binding
+error.
+
+Third, the optional `fromQuery` on `createLogicalSourceDefinition`
+hints at a feature the grammar supports: a logical source can be
+defined as the result of a query over other sources. This is
+NebulaStream's analogue of a materialised view. We will not cover
+it in this chapter — it is a small slice — but it exists.
+
+---
+
+## 5.4 Statement binding {#sec-binding}
+
+Parsing produces a tree of `AntlrSQLParser::*Context` nodes. Binding
+turns that tree into a typed `LogicalPlan`. The binder lives in
+`nes-sql-parser/src/StatementBinder.cpp`. Its contract is:
+
+```cpp
+// nes-sql-parser/src/StatementBinder.cpp
+class StatementBinder::Impl {
+    std::shared_ptr<const SourceCatalog> sourceCatalog;
+    std::function<LogicalPlan(AntlrSQLParser::QueryContext*)> queryBinder;
+public:
+    using Literal = std::variant<std::string, int64_t, uint64_t, double, bool>;
+    Impl(const std::shared_ptr<const SourceCatalog>& sourceCatalog,
+         const std::function<LogicalPlan(AntlrSQLParser::QueryContext*)>&
+             queryBinder)
+        : sourceCatalog(sourceCatalog), queryBinder(queryBinder) {}
+};
+```
+
+Binding does several things:
+
+1. **Resolves names.** `demo` in `FROM demo` becomes a reference to
+   the logical source registered under that name in the
+   `SourceCatalog`. An unknown name is a `UnknownSourceType` error.
+2. **Type-checks expressions.** A predicate like `WHERE speed >
+   100` is checked: `speed` must be a numeric field, `100` is an
+   integer literal, `>` is a binary operator with the right
+   signature.
+3. **Constructs operators.** Each clause in the query becomes a
+   `LogicalOperator`. The DAG is assembled bottom-up: source nodes
+   first, then projection/selection/window/join, then sink at the
+   root.
+4. **Validates output schemas.** The query's output schema must
+   match the sink's declared schema. `SELECT value FROM demo INTO
+   result` requires that `result`'s schema be compatible with the
+   single-column projection.
+
+The output is a `LogicalPlan` ready for the optimiser (Chapter 9).
+
+::: {.callout-tip title="Real-system reference: SQL→AST→logical-plan in Calcite"}
+Apache Calcite, the parser used by Flink SQL and Hive, follows a
+similar shape: parse tree → SqlNode AST → RelNode logical plan,
+with binding ("validation") in between. The two-stage approach is
+ANTLR-style: keep the syntactic tree close to the grammar, do
+semantic work in a second pass. NebulaStream's binder is much
+simpler than Calcite's because the language is much smaller.
+:::
+
+---
+
+## 5.5 The query catalog and source catalog {#sec-catalogs}
+
+Two pieces of state outlive any single query: the `SourceCatalog`
+and the `SinkCatalog`. Both live in
+`nes-sources/include/Sources/SourceCatalog.hpp` and the analogous
+sink path. They are simple key-to-descriptor maps.
+
+When `CREATE LOGICAL SOURCE demo(value UINT64)` runs, the catalog
+gets a new entry. When `CREATE PHYSICAL SOURCE FOR demo …` runs,
+the catalog gets a physical descriptor attached to the existing
+logical entry. When the user submits `SELECT … FROM demo`, the
+binder looks up `demo` in the catalog to resolve the schema and
+attach the physical descriptors.
+
+Catalog entries persist across queries within a single worker
+process. They do not (yet) persist across worker restarts. This is
+a deliberate choice: NebulaStream is not, today, designed as a
+metadata store.
+
+---
+
+## Summary {#sec-ch5-summary}
+
+NebulaStream's SQL dialect uses four statement shapes: logical
+source, physical source, sink, and query. The split between
+logical and physical sources is the most distinctive feature: a
+single logical source can have many physical realisations, and the
+engine treats them as one fan-in stream. The grammar is small and
+ANTLR4-based; binding produces a typed `LogicalPlan` from the
+parse tree by resolving names against a `SourceCatalog`, type-
+checking expressions, and assembling a DAG of `LogicalOperator`s.
+There is no Calcite-scale validator; the language is small enough
+for a straightforward visitor.
+
+---
+
+## Reading exercises {#sec-ch5-exercises}
+
+::: {.callout-important title="Reading exercise 5.1: parse a real query"}
+Take the demo query from Chapter 2 and feed it to the standalone
+parser test:
+
+```shell
+ctest --test-dir cmake-build-debug -R "AntlrSQLParserTest" \
+    --output-on-failure
+```
+
+Open `nes-sql-parser/tests/` and find the test that parses a
+similar four-statement script. Read the expected `LogicalPlan`
+that the binder produces. How many operators? What is the
+qualified field name of the sink's input?
+:::
+
+::: {.callout-important title="Reading exercise 5.2: introduce a binding error"}
+Modify the demo query so that the sink's schema does not match
+the projection (e.g., declare `result(other UINT64)`). Submit it
+and inspect the error. Where in `StatementBinder.cpp` is the
+mismatch detected? Which exception code from
+`nes-common/include/ExceptionDefinitions.inc` does it produce?
+:::
+
+::: {.callout-important title="Reading exercise 5.3: extend the grammar"}
+Suppose you wanted to add a `LIMIT N` clause to NebulaStream SQL.
+Walk through the changes: a grammar rule in `AntlrSQL.g4`, a new
+`LimitLogicalOperator` in `nes-logical-operators/`, a binding-step
+addition in `StatementBinder.cpp`, an optimiser pass-through in
+`nes-query-optimizer/`, a physical lowering in
+`nes-physical-operators/`. You do not need to write the code; the
+exercise is to identify every touchpoint.
+:::
+
+---
+
+## References {#sec-ch5-refs}
+
+- *NebulaStream grammar.* `nes-sql-parser/AntlrSQL.g4`.
+- *Statement binder.* `nes-sql-parser/src/StatementBinder.cpp`.
+- *Source catalog.* `nes-sources/include/Sources/SourceCatalog.hpp`.
+- *ANTLR4.* T. Parr. *The Definitive ANTLR 4 Reference*, 2nd ed.
+- *Calcite.* E. Begoli et al., *Apache Calcite: A Foundational
+  Framework for Optimized Query Processing Over Heterogeneous Data
+  Sources.* SIGMOD 2018.

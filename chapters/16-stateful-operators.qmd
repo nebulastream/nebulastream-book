@@ -1,0 +1,394 @@
+# Stateful Operators and State Management {#sec-stateful-operators}
+
+::: {.callout-note title="Status: complete first draft"}
+:::
+
+Stateless operators have it easy. A `Selection`, a `Map`, a
+`Projection` — each takes a record, transforms it, forwards it.
+Nothing remembered, nothing to clean up, nothing that can grow
+unbounded.
+
+Stateful operators are where streaming gets interesting. A hash
+join build accumulates one side of the join. A windowed aggregation
+accumulates partial sums per group per window. A session window
+operator accumulates per-session bookkeeping until the session
+times out. State is the engine's memory of what has happened, and
+it has to be kept correct, kept bounded, and kept usable across
+worker threads.
+
+This chapter walks through how NebulaStream manages stateful
+operator state. The data structures are the runtime ones we met in
+Chapter 12 (`HashMap`, `PagedVector`); the lifecycle is intricate
+enough to warrant its own chapter.
+
+---
+
+## 16.1 The state architecture: handlers, hash maps, and PagedVectors {#sec-state-arch}
+
+Every stateful operator in NebulaStream owns its state through an
+*operator handler*. The handler is a runtime object — distinct from
+the operator class itself — that holds the per-query state and
+exposes it to both the build and probe halves of the operator pair.
+
+Handlers are registered at query-startup time, identified by an
+`OperatorHandlerId`, and torn down when the pipeline that owns them
+is destroyed. The `OperatorHandlerId` is the join's "shared key" —
+the build operator references it to know where to insert; the
+probe operator references the same one to know where to look up.
+
+The state itself almost always combines two structures:
+
+- **A `HashMap`** keyed on the join key (or the grouping key). The
+  hash map holds entries, each a fixed-size header plus a pointer
+  to a value chain.
+- **A `PagedVector`** of values for chained collisions or
+  unbounded per-key history.
+
+Both come from `nes-nautilus/`; both are designed for the JIT to
+inline.
+
+---
+
+## 16.2 The hash join's state {#sec-hash-join-state}
+
+For a hash join, the build operator inserts each input tuple into
+the hash map keyed on the join key. Hash collisions chain at the
+bucket head. The probe operator looks up incoming tuples by hash
+and walks the chain emitting matches.
+
+The interface is small:
+
+```cpp
+// nes-nautilus/include/Nautilus/Interface/HashMap/HashMap.hpp
+class HashMap {
+public:
+    virtual ~HashMap() = default;
+    virtual AbstractHashMapEntry* insertEntry(
+        HashFunction::HashValue::raw_type hash,
+        AbstractBufferProvider* bufferProvider) = 0;
+    [[nodiscard]] virtual uint64_t getNumberOfTuples() const = 0;
+};
+```
+
+The concrete implementation is `ChainedHashMap`, in
+`nes-nautilus/src/Nautilus/Interface/HashMap/ChainedHashMap/ChainedHashMap.cpp`.
+The insertion path is worth reading in full because it shows how
+the hash map's storage is actually paged across `TupleBuffer`s:
+
+```cpp
+// nes-nautilus/src/Nautilus/Interface/HashMap/ChainedHashMap/ChainedHashMap.cpp (sketch)
+AbstractHashMapEntry* ChainedHashMap::insertEntry(
+    const HashFunction::HashValue::raw_type hash,
+    AbstractBufferProvider* bufferProvider)
+{
+    // Step 0: lazy bucket-array initialisation
+    if (entries == nullptr) [[unlikely]] {
+        const auto totalSpace = (numberOfChains + 1) * sizeof(ChainedHashMapEntry*);
+        entryBuffer = bufferProvider->getUnpooledBuffer(totalSpace);
+        entries = reinterpret_cast<ChainedHashMapEntry**>(
+            entryBuffer.getAvailableMemoryArea().data());
+        std::memset(entries, 0, entryBuffer->getBufferSize());
+    }
+    // Step 1: allocate a new storage page if the current one is full
+    if (numberOfTuples % entriesPerPage == 0) {
+        storageSpace.emplace_back(bufferProvider->getUnpooledBuffer(pageSize).value());
+    }
+    // Step 2: locate the next entry slot in the current page
+    const auto pageIndex = numberOfTuples / entriesPerPage;
+    auto& bufferStorage = storageSpace[pageIndex];
+    const auto entryOffset =
+        (numberOfTuples - pageIndex * entriesPerPage) * entrySize;
+    // Step 3: chain at bucket head (head of bucket's linked list)
+    const auto entryPos = hash & mask;
+    auto* const newEntry = new (
+        bufferStorage.getAvailableMemoryArea().subspan(entryOffset).data())
+        ChainedHashMapEntry(hash);
+    newEntry->next = entries[entryPos];
+    entries[entryPos] = newEntry;
+    ++numberOfTuples;
+    return newEntry;
+}
+```
+
+Four observations.
+
+**The bucket array is allocated lazily.** First insertion
+allocates `(numberOfChains + 1) * sizeof(pointer)` bytes via an
+unpooled buffer (sized for the array, not the standard 8 KiB).
+Empty hash maps cost nothing.
+
+**Entries are stored in a sequence of pages.** Each page is one
+`TupleBuffer` from the pool; once full, a new buffer is
+allocated. This is what "paged across TupleBuffers" means in
+practice — the hash map is not one contiguous arena, it is a
+vector of pages, and the buffer pool is the allocator.
+
+**Insertion is at the *head* of the bucket chain.** Newly-
+inserted entries are visited first by probes. For a join where
+the most recently inserted records are the most likely matches,
+this is faster than tail insertion.
+
+**The mask is a power-of-two AND.** `hash & mask` requires
+`mask = numberOfChains - 1` and `numberOfChains` to be a
+power of two. This is faster than modulo and standard for
+in-memory hash tables; the cost is that the chain count must
+round up to a power of two.
+
+::: {.callout-note title="Example 16.1: a hash join in flight"}
+For `SELECT * FROM r JOIN s ON r.k = s.k INTO matched`, the build
+side accumulates `r`'s tuples until `r`'s watermark advances past
+the join window's end. Suppose `r` has 100,000 tuples; the hash
+map holds 100,000 entries, paged across roughly 30 buffers (each
+holding ~3,300 entries depending on entry size).
+
+When `s`'s tuples arrive, the probe operator hashes each, jumps
+to the entry, walks the collision chain (typically one or two
+entries per bucket if the hash function is good), and emits one
+output tuple per match. After the join window closes, the
+operator handler tears down the hash map, releasing 30 buffers
+back to the pool.
+:::
+
+---
+
+## 16.3 Aggregation state {#sec-aggregation-state}
+
+A windowed aggregation's state is also a hash map, but the values
+are *partial aggregates*, not records:
+
+- For `SUM(x)`: value is `(running_sum, count)`.
+- For `AVG(x)`: value is `(running_sum, count)`, with the average
+  computed at probe time.
+- For `MIN(x)`: value is `(running_min)`.
+- For `COUNT(*)`: value is `(count)`.
+
+These are small, fixed-size, and combinable. The build side
+combines incoming tuples into partial aggregates; the probe side,
+when a window fires, walks the hash map and emits one record per
+key with the final aggregate value.
+
+For sliding windows where multiple windows can be live
+simultaneously, the state grows linearly in the number of active
+windows. The engine partitions state by window: each (window,
+key) pair gets its own hash-map entry. When a window fires *and*
+all sliding windows that include the same data have either fired
+or been GC'd, the state for that window is freed.
+
+---
+
+## 16.4 The slice abstraction {#sec-slices}
+
+Window state has a finite lifetime: it lives until the window
+fires, plus a grace period for late data, then it can be released.
+The engine's mechanism for this is the *slice*.
+
+A slice is a contiguous time range of state. For tumbling windows
+of size 1 second, every slice is also 1 second. For sliding
+windows of size 5 seconds, advancing every 1 second, the slice
+boundary is the GCD of the size and advance — 1 second. The
+mechanic is in `WindowSlicesStoreInterface` (in
+`nes-physical-operators/include/`).
+
+When a tuple arrives with event-time timestamp `t`, it is assigned
+to a slice. Each slice has an end time `t_end`; when the engine's
+notion of progress crosses `t_end`, the slice can be probed (its
+windows fire) and, after the probe, garbage collected.
+
+The handler is `WindowBasedOperatorHandler`, defined in
+`nes-physical-operators/include/`:
+
+```cpp
+// nes-physical-operators/include/WindowBasedOperatorHandler.hpp (sketch)
+class WindowBasedOperatorHandler : public OperatorHandler {
+    std::unique_ptr<WindowSlicesStoreInterface> sliceAndWindowStore;
+    std::unique_ptr<MultiOriginWatermarkProcessor> watermarkProcessorBuild;
+    std::unique_ptr<MultiOriginWatermarkProcessor> watermarkProcessorProbe;
+public:
+    WindowBasedOperatorHandler(
+        const std::vector<OriginId>& inputOrigins,
+        const OriginId outputOriginId,
+        std::unique_ptr<WindowSlicesStoreInterface> sliceAndWindowStore);
+    void setWorkerThreads(uint64_t numberOfWorkerThreads);
+    void checkAndTriggerWindows(const BufferMetaData&, PipelineExecutionContext*);
+    virtual void triggerSlices(
+        const std::map<WindowInfoAndSequenceNumber,
+                       std::vector<std::shared_ptr<Slice>>>&,
+        PipelineExecutionContext*) = 0;
+};
+```
+
+The handler holds **two `MultiOriginWatermarkProcessor`s**:
+`watermarkProcessorBuild` for input origins and
+`watermarkProcessorProbe` for the single output origin (the
+output of the operator becomes a new origin in its own right —
+see Chapter 7). The constructor wires them up:
+
+```cpp
+// nes-physical-operators/src/WindowBasedOperatorHandler.cpp (sketch)
+WindowBasedOperatorHandler::WindowBasedOperatorHandler(
+    const std::vector<OriginId>& inputOrigins,
+    const OriginId outputOriginId,
+    std::unique_ptr<WindowSlicesStoreInterface> sliceAndWindowStore)
+    : sliceAndWindowStore(std::move(sliceAndWindowStore)),
+      watermarkProcessorBuild(
+          std::make_unique<MultiOriginWatermarkProcessor>(inputOrigins)),
+      watermarkProcessorProbe(
+          std::make_unique<MultiOriginWatermarkProcessor>(
+              std::vector{outputOriginId}))
+{}
+```
+
+`checkAndTriggerWindows` is called as buffers arrive and
+watermarks advance. It examines the build watermark, identifies
+any slices whose end time has been crossed, and calls
+`triggerSlices` for them. `triggerSlices` is operator-specific —
+for an aggregation, it walks the per-slice hash maps and emits
+one tuple per group.
+
+Each window slice carries a hash map *per worker thread*:
+
+```cpp
+// nes-physical-operators/include/Aggregation/AggregationSlice.hpp (sketch)
+class AggregationSlice final : public HashMapSlice {
+public:
+    HashMap* getHashMapPtr(WorkerThreadId workerThreadId) const;
+    HashMap* getHashMapPtrOrCreate(WorkerThreadId workerThreadId);
+};
+```
+
+Per-thread hash maps avoid contention on the hot path: each
+worker writes into its own shard. At trigger time, the probe
+phase merges shards before emitting results. This is a
+classical sharding-vs-locking trade-off, and the code chose
+sharding.
+
+A small state-machine governs each window's lifetime:
+`WINDOW_FILLING` → `EMITTED_TO_PROBE` (or
+`WAITING_ON_TERMINATION` on shutdown). The store advances
+windows through these states based on watermark progress; once
+emitted, the slice's storage is eligible for garbage collection.
+
+---
+
+## 16.5 Concurrent state, safely {#sec-concurrent-state}
+
+State is shared between worker threads. Multiple workers can
+simultaneously be inserting into the same build's hash map, or
+probing the same join's state, or accumulating into the same
+window's partial aggregates.
+
+NebulaStream handles concurrency in three layers.
+
+**Lock-free at the hash-map level.** The hash map's insertion uses
+atomic CAS for slot acquisition. Two workers inserting different
+keys do not contend; two workers inserting the same key contend
+briefly on the value-chain head pointer.
+
+**Per-window watermark coordination.** Two watermark processors
+live on each `WindowBasedOperatorHandler`: one tracks the build
+side, one tracks the probe side. The watermarks are advanced
+atomically; a window's transition from "open" to "ready to fire"
+is a single atomic check.
+
+**Coarse-grained for less-contended state.** State that is not on
+the hot path (the slice store metadata, the per-handler GC list)
+is protected by a `folly::Synchronized` wrapper, which is
+essentially a mutex with a more ergonomic API.
+
+The engine chooses lock-freedom on the hot paths and locks
+elsewhere — the standard concurrent-data-structures trade-off.
+
+---
+
+## 16.6 Garbage collection {#sec-gc}
+
+State has to be released. The engine releases it conservatively
+via the slice-and-watermark machinery from Chapter 7:
+
+1. A slice is "complete" when all upstream watermarks have passed
+   the slice's end time.
+2. A complete slice is "fired" — its windows trigger and emit
+   results.
+3. After firing, the slice is "garbage" — eligible for release.
+4. The handler's `garbageCollectSlicesAndWindows` walks the
+   garbage list and frees the underlying buffers.
+
+The release is to the buffer pool, not to the OS. Buffers go back
+into the pool's queue and are immediately available for reuse by
+fresh state.
+
+Late-arriving data that targets a freed slice is *dropped*, not
+re-incorporated. This matches the engine's overall stance: when in
+doubt, prefer correctness over leniency. Flink's "late side
+output" mechanism would be a future addition.
+
+A note worth making before this chapter ends: NebulaStream's
+*execution-state* — the hash maps and PagedVectors we have been
+discussing — is in-memory only. There is no checkpointing path
+yet that would let a worker crash and resume from a snapshot.
+What does exist is a small piece of *client-side query
+metadata* persistence in `nes-frontend/apps/cli/QueryStateBackend.hpp`
+that records query IDs and timestamps under
+`~/.local/state/nebucli/`. That is REPL/CLI bookkeeping, not
+execution-state recovery. The two are easy to confuse;
+Chapter 22 spells out the difference.
+
+---
+
+## Summary {#sec-ch16-summary}
+
+Stateful operators in NebulaStream own their state through
+operator handlers, which are runtime objects identified by an
+`OperatorHandlerId` and shared between the build and probe halves
+of the operator. The state is almost always a `HashMap` keyed on
+the operator's grouping/join key, possibly with a `PagedVector`
+for collision chains or per-key history. Both data structures are
+paged across `TupleBuffer`s from the buffer pool, allowing
+release back to the pool when a slice's lifetime ends. Concurrency
+is handled by lock-free CAS on the hot path and `folly::Synchronized`
+locks elsewhere. State is garbage-collected slice-by-slice as
+watermarks advance; late-arriving data targeting freed slices is
+silently dropped.
+
+---
+
+## Reading exercises {#sec-ch16-exercises}
+
+::: {.callout-important title="Reading exercise 16.1: measure state size"}
+Add a counter that logs `getNumberOfTuples()` on the join's hash
+map every second. Run a streaming join with two slow streams.
+Plot the growth curve. Where does it level off? At what point
+does GC start releasing state?
+:::
+
+::: {.callout-important title="Reading exercise 16.2: pool pressure on join state"}
+Reduce the buffer pool to 32 buffers (Chapter 4 exercise) and
+run a join that needs more state than that. What happens? The
+hash map should fail to allocate; the engine should signal
+backpressure all the way up to sources. Trace the propagation.
+:::
+
+::: {.callout-important title="Reading exercise 16.3: late data drop"}
+Modify a tumbling-window test to inject a tuple whose event time
+is far in the past — older than the most recently fired window.
+Confirm that the tuple is dropped silently. What log line
+records the drop, if any?
+:::
+
+---
+
+## References {#sec-ch16-refs}
+
+- *HashMap.*
+  `nes-nautilus/include/Nautilus/Interface/HashMap/HashMap.hpp`.
+- *PagedVector.*
+  `nes-nautilus/include/Nautilus/Interface/PagedVector/PagedVector.hpp`.
+- *WindowBasedOperatorHandler.*
+  `nes-physical-operators/include/WindowBasedOperatorHandler.hpp`.
+- *Linear probing hash tables.* H. Knuth, *The Art of Computer
+  Programming*, vol. 3, §6.4.
+- *Streaming joins state management.* J. Krämer, B. Seeger.
+  *Semantics and Implementation of Continuous Sliding Window
+  Queries Over Data Streams.* TODS 2009.
+- *Lock-free hash maps.* M. Michael, *High Performance Dynamic
+  Lock-Free Hash Tables and List-Based Sets.* SPAA 2002.

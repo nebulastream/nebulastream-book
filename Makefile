@@ -1,4 +1,4 @@
-.PHONY: help html pdf preview drift-check clean
+.PHONY: help html pdf preview drift-check publish clean
 
 help:
 	@echo "Targets:"
@@ -6,6 +6,7 @@ help:
 	@echo "  pdf          Render the book to PDF (requires LuaLaTeX)"
 	@echo "  preview      Live-preview while editing"
 	@echo "  drift-check  Verify cited file paths/line ranges resolve"
+	@echo "  publish      Render and force-push HTML to gh-pages branch"
 	@echo "  clean        Remove rendered output"
 
 html:
@@ -19,6 +20,9 @@ preview:
 
 drift-check:
 	@python3 scripts/drift-check.py
+
+publish:
+	@./scripts/publish.sh
 
 clean:
 	rm -rf _book .quarto
